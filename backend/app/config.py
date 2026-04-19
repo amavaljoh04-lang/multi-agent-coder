@@ -42,6 +42,16 @@ class OrchestratorConfig(BaseModel):
     sandbox: str = "docker"
     sandbox_image: str = "python:3.12-slim"
     sandbox_timeout: int = 600
+    # Number of coder tasks that may run in parallel. We have 3 GPUs, so 2-3
+    # concurrent coders is the sweet spot: independent tasks (e.g. models vs
+    # endpoints) get coded simultaneously, dividing wall-clock time roughly
+    # by this factor.
+    parallel_coders: int = 2
+    # Absolute wall-clock budget for a single project, in seconds. -1 = unlimited.
+    # Lets the orchestrator keep iterating for days on hard projects without a
+    # hardcoded max_iterations cap. The project is failed with a clear message
+    # when the budget is exceeded.
+    max_wall_seconds: int = -1
 
 
 class AppConfig(BaseModel):

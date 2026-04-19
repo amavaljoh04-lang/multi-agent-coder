@@ -105,6 +105,8 @@ class Orchestrator:
     # ------------------------------------------------------------- internals
 
     async def _run(self, project_id: str, stop: asyncio.Event) -> None:
+        heartbeat = asyncio.create_task(self._heartbeat_loop(project_id, stop))
+        budget = asyncio.create_task(self._budget_loop(project_id, stop))
         try:
             await self._drive(project_id, stop)
         except asyncio.CancelledError:
@@ -113,6 +115,56 @@ class Orchestrator:
             log.exception("orchestrator crashed for %s", project_id)
             await self.emit(project_id, "error", "", f"Orchestrator crashed: {exc}")
             await self._set_status(project_id, ProjectStatus.FAILED, last_error=str(exc))
+        finally:
+            for t in (heartbeat, budget):
+                t.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await t
+
+    async def _heartbeat_loop(self, project_id: str, stop: asyncio.Event) -> None:
+        """Periodically update ``heartbeat_at`` so long-running projects
+        (potentially days) are obviously alive in the UI. Doubles as a
+        checkpoint marker: a crash-restart can see when we last wrote."""
+        interval = max(5, self.cfg.orchestrator.heartbeat_interval)
+        try:
+            while not stop.is_set():
+                await self._update(project_id, heartbeat_at=dt.datetime.now(dt.UTC))
+                await asyncio.sleep(interval)
+        except asyncio.CancelledError:
+            return
+
+    async def _budget_loop(self, project_id: str, stop: asyncio.Event) -> None:
+        """Enforce ``max_wall_seconds`` if configured (>0).
+
+        Projects are allowed to iterate as long as needed by default
+        (``max_wall_seconds=-1``). With a budget set, the worker is asked
+        to stop cleanly once the cumulative wall-clock time exceeds it.
+        """
+        budget = self.cfg.orchestrator.max_wall_seconds
+        if budget <= 0:
+            return
+        project = await self._get_project(project_id)
+        if project is None:
+            return
+        started = project.created_at or dt.datetime.now(dt.UTC)
+        deadline = started + dt.timedelta(seconds=budget)
+        try:
+            while not stop.is_set():
+                now = dt.datetime.now(dt.UTC)
+                if now >= deadline:
+                    await self.emit(
+                        project_id, "warning", "",
+                        f"Wall-clock budget ({budget}s) exceeded; stopping.",
+                    )
+                    stop.set()
+                    await self._set_status(
+                        project_id, ProjectStatus.FAILED,
+                        last_error=f"budget_exceeded after {budget}s",
+                    )
+                    return
+                await asyncio.sleep(min(30, (deadline - now).total_seconds()))
+        except asyncio.CancelledError:
+            return
 
     async def _drive(self, project_id: str, stop: asyncio.Event) -> None:
         # 1. load project
@@ -174,106 +226,151 @@ class Orchestrator:
     async def _code_review_loop(
         self, project_id: str, plan: dict[str, Any], workspace: Path, stop: asyncio.Event
     ) -> None:
-        max_reviews = self.cfg.orchestrator.max_review_retries
+        """Dispatch pending tasks to up to ``parallel_coders`` workers.
+
+        A task is "ready" when every entry in its ``depends_on`` list is
+        resolved (either matches the title/id of a DONE task, or doesn't
+        match any known task at all — the latter treated permissively so a
+        weakly-typed planner dep doesn't block forever).
+        """
+        parallelism = max(1, self.cfg.orchestrator.parallel_coders)
+        in_flight: dict[str, asyncio.Task[None]] = {}
+        await self._set_status(project_id, ProjectStatus.CODING)
 
         while not stop.is_set():
-            task = await self._next_pending_task(project_id)
-            if task is None:
+            # Fill worker slots with any ready tasks.
+            while len(in_flight) < parallelism:
+                ready = await self._next_ready_task(
+                    project_id, skip_ids=set(in_flight.keys())
+                )
+                if ready is None:
+                    break
+                await self._set_task_status(ready.id, TaskStatus.CODING)
+                worker = asyncio.create_task(
+                    self._run_one_task(project_id, ready, plan, workspace, stop),
+                    name=f"task-{ready.id[:8]}",
+                )
+                in_flight[ready.id] = worker
+
+            if not in_flight:
+                # Nothing in flight and nothing ready. Either we're done, or
+                # some tasks are blocked on a dep that's still pending but
+                # no worker picked it up (shouldn't happen). Exit.
                 return
-            await self._set_status(project_id, ProjectStatus.CODING)
-            existing = await self._collect_files(project_id)
-            review_notes = task.review_notes or ""
 
-            await self._set_task_status(task.id, TaskStatus.CODING)
-            await self.emit(
-                project_id, "agent", "coder",
-                f"[{task.title}] coding {len(task.file_paths)} file(s)",
-                data={"task_id": task.id, "files": task.file_paths},
+            done, _pending = await asyncio.wait(
+                in_flight.values(), return_when=asyncio.FIRST_COMPLETED
             )
-            try:
-                task_dict = {
-                    "id": task.id,
-                    "title": task.title,
-                    "description": task.description,
-                    "file_paths": task.file_paths,
-                }
-                blocks = await agents.run_coder(
-                    self.router,
-                    plan=plan,
-                    task=task_dict,
-                    existing_files=existing,
-                    review_notes=review_notes,
-                    stream_callback=self._coder_streamer(project_id, "coder"),
-                )
-            except Exception as exc:
-                await self._bump_attempts(task.id, error=str(exc))
-                await self.emit(project_id, "error", "coder", f"[{task.title}] {exc}")
-                if task.attempts + 1 >= max_reviews:
-                    await self._set_task_status(task.id, TaskStatus.FAILED)
-                    await self._set_status(project_id, ProjectStatus.FAILED, last_error=str(exc))
-                    return
-                continue
+            # Remove finished workers and surface fatal errors.
+            for task in done:
+                for tid, wt in list(in_flight.items()):
+                    if wt is task:
+                        del in_flight[tid]
+                        break
+                if task.cancelled():
+                    continue
+                exc = task.exception()
+                if exc is not None:
+                    # Propagate: cancel siblings and bubble up.
+                    for other in in_flight.values():
+                        other.cancel()
+                    raise exc
 
-            await self._write_files(project_id, workspace, blocks)
-            await self._set_status(project_id, ProjectStatus.REVIEWING)
-            await self._set_task_status(task.id, TaskStatus.REVIEWING)
-            await self.emit(project_id, "agent", "reviewer", f"[{task.title}] reviewing...")
-            # Tell the UI which files are about to be reviewed so it can pulse
-            # a "reviewing" state on each one individually.
-            for _rpath in blocks:
-                await self.emit(
-                    project_id, "file_review_start", "reviewer", _rpath,
-                    data={"path": _rpath},
-                )
+    async def _run_one_task(
+        self,
+        project_id: str,
+        task: Task,
+        plan: dict[str, Any],
+        workspace: Path,
+        stop: asyncio.Event,
+    ) -> None:
+        """Code → write → review cycle for a single task.
 
-            try:
-                review = await agents.run_reviewer(
-                    self.router,
-                    plan=plan,
-                    task=task_dict,
-                    files=blocks,
-                    stream_callback=self._streamer(project_id, "reviewer"),
-                )
-            except Exception as exc:
-                # Reviewer failing is not fatal — approve and move on.
-                await self.emit(project_id, "warning", "reviewer", f"review skipped: {exc}")
-                review = {"approved": True, "issues": [], "notes": "review unavailable"}
+        Runs concurrently with sibling tasks. Each worker holds its own
+        reference to the Task it started with, but always reads/writes the
+        canonical row from SQLite so attempts and status are consistent.
+        """
+        max_reviews = self.cfg.orchestrator.max_review_retries
+        existing = await self._collect_files(project_id)
+        review_notes = task.review_notes or ""
 
-            # Emit per-file verdicts. A file is approved if no issue mentions
-            # it by path; otherwise rejected. With the overall verdict as a
-            # safety fallback.
-            issues_text = " ".join(review.get("issues", []))
-            approved_overall = bool(review.get("approved"))
-            for _rpath in blocks:
-                file_ok = approved_overall and (_rpath not in issues_text)
-                await self.emit(
-                    project_id, "file_review_end", "reviewer", _rpath,
-                    data={"path": _rpath, "approved": file_ok},
-                )
+        await self.emit(
+            project_id, "agent", "coder",
+            f"[{task.title}] coding {len(task.file_paths)} file(s)",
+            data={"task_id": task.id, "files": task.file_paths},
+        )
+        try:
+            task_dict = {
+                "id": task.id,
+                "title": task.title,
+                "description": task.description,
+                "file_paths": task.file_paths,
+            }
+            blocks = await agents.run_coder(
+                self.router,
+                plan=plan,
+                task=task_dict,
+                existing_files=existing,
+                review_notes=review_notes,
+                stream_callback=self._coder_streamer(project_id, "coder"),
+            )
+        except Exception as exc:
+            await self._bump_attempts(task.id, error=str(exc))
+            await self.emit(project_id, "error", "coder", f"[{task.title}] {exc}")
+            if task.attempts + 1 >= max_reviews:
+                await self._set_task_status(task.id, TaskStatus.FAILED)
+            return
 
-            if review.get("approved"):
-                await self._set_task_status(task.id, TaskStatus.DONE)
-                await self.emit(
-                    project_id, "agent", "reviewer", f"[{task.title}] approved",
-                    data={"notes": review.get("notes", "")},
-                )
-            else:
-                notes = "\n".join(f"- {i}" for i in review.get("issues", []))
-                await self._bump_attempts(task.id, review_notes=notes)
-                # Use "warning" so the reviewer's issue list shows up in the
-                # compact event log (expandable) rather than flashing through
-                # the live agent row.
-                await self.emit(
-                    project_id, "warning", "reviewer", f"[{task.title}] rejected",
-                    data={"issues": review.get("issues", [])},
-                )
-                if task.attempts + 1 >= max_reviews:
-                    # Give up on review gate and move on so the test stage can catch it.
-                    await self._set_task_status(task.id, TaskStatus.DONE)
-                    await self.emit(
-                        project_id, "warning", "reviewer",
-                        f"[{task.title}] force-approved after {task.attempts + 1} attempts",
-                    )
+        await self._write_files(project_id, workspace, blocks)
+        await self._set_task_status(task.id, TaskStatus.REVIEWING)
+        await self.emit(project_id, "agent", "reviewer", f"[{task.title}] reviewing...")
+        for _rpath in blocks:
+            await self.emit(
+                project_id, "file_review_start", "reviewer", _rpath,
+                data={"path": _rpath},
+            )
+
+        try:
+            review = await agents.run_reviewer(
+                self.router,
+                plan=plan,
+                task=task_dict,
+                files=blocks,
+                stream_callback=self._streamer(project_id, "reviewer"),
+            )
+        except Exception as exc:
+            await self.emit(project_id, "warning", "reviewer", f"review skipped: {exc}")
+            review = {"approved": True, "issues": [], "notes": "review unavailable"}
+
+        issues_text = " ".join(review.get("issues", []))
+        approved_overall = bool(review.get("approved"))
+        for _rpath in blocks:
+            file_ok = approved_overall and (_rpath not in issues_text)
+            await self.emit(
+                project_id, "file_review_end", "reviewer", _rpath,
+                data={"path": _rpath, "approved": file_ok},
+            )
+
+        if approved_overall:
+            await self._set_task_status(task.id, TaskStatus.DONE)
+            await self.emit(
+                project_id, "agent", "reviewer", f"[{task.title}] approved",
+                data={"notes": review.get("notes", "")},
+            )
+            return
+
+        notes = "\n".join(f"- {i}" for i in review.get("issues", []))
+        await self._bump_attempts(task.id, review_notes=notes)
+        await self.emit(
+            project_id, "warning", "reviewer", f"[{task.title}] rejected",
+            data={"issues": review.get("issues", [])},
+        )
+        if task.attempts + 1 >= max_reviews:
+            await self._set_task_status(task.id, TaskStatus.DONE)
+            await self.emit(
+                project_id, "warning", "reviewer",
+                f"[{task.title}] force-approved after {task.attempts + 1} attempts",
+            )
 
     async def _gate_all_files_exist(
         self, project_id: str, plan: dict[str, Any], workspace: Path, stop: asyncio.Event
@@ -683,6 +780,49 @@ class Orchestrator:
                 )
             ).scalars().first()
             return row
+
+    async def _next_ready_task(
+        self, project_id: str, skip_ids: set[str] | None = None
+    ) -> Task | None:
+        """Find the next PENDING task whose dependencies are satisfied.
+
+        ``Task.depends_on`` entries may be planner-style short ids ("t0"),
+        titles, or DB uuids. We resolve by title or id; any dep that matches
+        no known task is treated as satisfied (permissive) so a noisy planner
+        doesn't deadlock the pipeline.
+        """
+        skip_ids = skip_ids or set()
+        async with SessionLocal() as s:
+            rows = (
+                await s.execute(
+                    select(Task)
+                    .where(Task.project_id == project_id)
+                    .order_by(Task.order_index)
+                )
+            ).scalars().all()
+
+        done_keys: set[str] = set()
+        all_keys: set[str] = set()
+        for t in rows:
+            all_keys.add(t.title)
+            all_keys.add(t.id)
+            if t.status == TaskStatus.DONE:
+                done_keys.add(t.title)
+                done_keys.add(t.id)
+
+        for t in rows:
+            if t.id in skip_ids:
+                continue
+            if t.status != TaskStatus.PENDING:
+                continue
+            blocked = False
+            for dep in t.depends_on or []:
+                if dep in all_keys and dep not in done_keys:
+                    blocked = True
+                    break
+            if not blocked:
+                return t
+        return None
 
     async def _set_task_status(self, task_id: str, status: TaskStatus) -> None:
         async with SessionLocal() as s:
