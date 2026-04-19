@@ -330,13 +330,23 @@ class Orchestrator:
         # imports via ruff BEFORE paying for a 30s LLM review round-trip.
         # When lint fails, bounce the task back to the coder with the
         # issues as review_notes — no LLM review for this attempt.
-        lint_issues = await self._lint_python_files(workspace, list(blocks.keys()))
+        lint_issues, bad_paths = await self._lint_python_files(
+            workspace, list(blocks.keys())
+        )
         if lint_issues:
             for _rpath in blocks:
-                await self.emit(
-                    project_id, "file_review_end", "reviewer", _rpath,
-                    data={"path": _rpath, "approved": False},
-                )
+                if _rpath in bad_paths:
+                    await self.emit(
+                        project_id, "file_review_end", "reviewer", _rpath,
+                        data={"path": _rpath, "approved": False},
+                    )
+                else:
+                    # File was fine — don't mark it rejected just because a
+                    # sibling in the same task failed lint.
+                    await self.emit(
+                        project_id, "file_review_end", "reviewer", _rpath,
+                        data={"path": _rpath, "approved": True},
+                    )
             notes = "Lint errors (ruff) must be fixed:\n" + "\n".join(
                 f"- {i}" for i in lint_issues[:20]
             )
@@ -833,30 +843,43 @@ class Orchestrator:
 
     async def _lint_python_files(
         self, workspace: Path, paths: list[str]
-    ) -> list[str]:
-        """Run ruff on the given Python files and return human-readable issues.
+    ) -> tuple[list[str], set[str]]:
+        """Run ruff on the given Python files and return (issues, bad_paths).
 
-        Kept deliberately focused on correctness rules (syntax errors,
-        undefined names, dead imports) — NOT style — so we don't reject
-        code for cosmetic reasons. Returns empty list if ruff is missing
-        or no Python files are in the task.
+        Scope is deliberately narrow: only rules that mean "the code is
+        broken at runtime" get flagged.
+
+        * E9 — real syntax errors (parser failed).
+        * F63/F7/F82 — pyflakes-level parse errors.
+        * F821 — undefined name used at runtime (NameError).
+
+        We explicitly do NOT flag:
+
+        * F401 "unused import" — legitimate in ``__init__.py`` re-exports
+          and in conditional imports.
+        * F811 "redefinition" — not a runtime bug.
+        * F841 "unused local" — stylistic.
+
+        Returns empty output when ruff is missing or no Python files are
+        in the task, so the pipeline degrades gracefully.
         """
         py_files = [p for p in paths if p.endswith(".py")]
         if not py_files:
-            return []
-        full = [str(workspace / p) for p in py_files if (workspace / p).exists()]
-        if not full:
-            return []
-        # E9: syntax errors. F63/F7/F82: pyflakes errors (undefined name,
-        # syntax in a test). F401: unused import. F811: redefinition.
-        # F821: undefined name at use site. F841: unused local.
-        selected = "E9,F63,F7,F82,F401,F811,F821,F841"
+            return [], set()
+        rel_by_abs = {
+            str((workspace / p).resolve()): p
+            for p in py_files
+            if (workspace / p).exists()
+        }
+        if not rel_by_abs:
+            return [], set()
+        selected = "E9,F63,F7,F82,F821"
         cmd = [
             "ruff", "check",
             "--select", selected,
             "--output-format", "concise",
             "--no-fix",
-            *full,
+            *rel_by_abs.keys(),
         ]
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -866,19 +889,24 @@ class Orchestrator:
             )
             stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
         except (FileNotFoundError, TimeoutError):
-            return []
+            return [], set()
         if proc.returncode == 0:
-            return []
-        workspace_s = str(workspace.resolve())
+            return [], set()
         issues: list[str] = []
+        bad: set[str] = set()
         for line in stdout.decode(errors="replace").splitlines():
             line = line.strip()
             if not line or line.startswith("Found ") or line.startswith("[*]"):
                 continue
-            if line.startswith(workspace_s):
-                line = line[len(workspace_s):].lstrip("/")
+            # Map absolute path prefix back to the relative path the
+            # orchestrator knows, and remember which files failed.
+            for abs_path, rel_path in rel_by_abs.items():
+                if line.startswith(abs_path):
+                    bad.add(rel_path)
+                    line = rel_path + line[len(abs_path):]
+                    break
             issues.append(line)
-        return issues
+        return issues, bad
 
     async def _next_pending_task(self, project_id: str) -> Task | None:
         async with SessionLocal() as s:
