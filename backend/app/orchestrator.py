@@ -323,6 +323,35 @@ class Orchestrator:
 
         await self._write_files(project_id, workspace, blocks)
         await self._set_task_status(task.id, TaskStatus.REVIEWING)
+
+        # Pre-review lint: catch syntax errors / undefined names / dead
+        # imports via ruff BEFORE paying for a 30s LLM review round-trip.
+        # When lint fails, bounce the task back to the coder with the
+        # issues as review_notes — no LLM review for this attempt.
+        lint_issues = await self._lint_python_files(workspace, list(blocks.keys()))
+        if lint_issues:
+            for _rpath in blocks:
+                await self.emit(
+                    project_id, "file_review_end", "reviewer", _rpath,
+                    data={"path": _rpath, "approved": False},
+                )
+            notes = "Lint errors (ruff) must be fixed:\n" + "\n".join(
+                f"- {i}" for i in lint_issues[:20]
+            )
+            await self._bump_attempts(task.id, review_notes=notes)
+            await self.emit(
+                project_id, "warning", "reviewer",
+                f"[{task.title}] lint check rejected ({len(lint_issues)} issue(s))",
+                data={"issues": lint_issues},
+            )
+            if task.attempts + 1 >= max_reviews:
+                await self._set_task_status(task.id, TaskStatus.DONE)
+                await self.emit(
+                    project_id, "warning", "reviewer",
+                    f"[{task.title}] force-approved after lint loop",
+                )
+            return
+
         await self.emit(project_id, "agent", "reviewer", f"[{task.title}] reviewing...")
         for _rpath in blocks:
             await self.emit(
@@ -768,6 +797,55 @@ class Orchestrator:
                         )
                     )
             await s.commit()
+
+    async def _lint_python_files(
+        self, workspace: Path, paths: list[str]
+    ) -> list[str]:
+        """Run ruff on the given Python files and return human-readable issues.
+
+        Kept deliberately focused on correctness rules (syntax errors,
+        undefined names, dead imports) — NOT style — so we don't reject
+        code for cosmetic reasons. Returns empty list if ruff is missing
+        or no Python files are in the task.
+        """
+        py_files = [p for p in paths if p.endswith(".py")]
+        if not py_files:
+            return []
+        full = [str(workspace / p) for p in py_files if (workspace / p).exists()]
+        if not full:
+            return []
+        # E9: syntax errors. F63/F7/F82: pyflakes errors (undefined name,
+        # syntax in a test). F401: unused import. F811: redefinition.
+        # F821: undefined name at use site. F841: unused local.
+        selected = "E9,F63,F7,F82,F401,F811,F821,F841"
+        cmd = [
+            "ruff", "check",
+            "--select", selected,
+            "--output-format", "concise",
+            "--no-fix",
+            *full,
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
+        except (FileNotFoundError, TimeoutError):
+            return []
+        if proc.returncode == 0:
+            return []
+        workspace_s = str(workspace.resolve())
+        issues: list[str] = []
+        for line in stdout.decode(errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("Found ") or line.startswith("[*]"):
+                continue
+            if line.startswith(workspace_s):
+                line = line[len(workspace_s):].lstrip("/")
+            issues.append(line)
+        return issues
 
     async def _next_pending_task(self, project_id: str) -> Task | None:
         async with SessionLocal() as s:
