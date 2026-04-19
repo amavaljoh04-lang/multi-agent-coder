@@ -43,6 +43,19 @@ Rules:
 - Include a README.md task.
 - Do NOT include build artifacts, lockfiles, or binary files.
 - Keep it minimal and runnable. Aim for <= 25 files unless the project truly needs more.
+
+Project structure conventions:
+- Python: keep ONE canonical import layout and stick to it. Either put the
+  application as a package `<name>/__init__.py` + `<name>/main.py`, OR put
+  modules flat at the repo root (e.g. `app.py`, `models.py`). Do not mix.
+  Tests import with the exact path you chose (`from <name>.main import app`
+  or `from app import app`). The sandbox adds the workspace root to
+  PYTHONPATH, so flat-at-root imports just work from `tests/`.
+- Python: "install_command" should install pytest if tests are present
+  (usually `pip install -r requirements.txt` with pytest listed there).
+- Python: "test_command" should be `pytest -q` or similar.
+- Node: ensure package.json declares a "test" script.
+
 Return ONLY the JSON object.
 """
 

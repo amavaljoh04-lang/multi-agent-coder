@@ -29,11 +29,21 @@ Return JSON:
   "notes": "short overall comment"
 }}
 
-Approve only if:
-- All requested files are present.
-- No placeholders, TODOs, or "..." left in the code.
-- Imports / syntax look valid.
-- Interfaces match the plan.
+REJECT ONLY for objective correctness problems:
+- A requested file is missing.
+- A file still contains placeholders, TODOs, "..." or stub bodies like `pass`.
+- Imports or syntax are clearly broken.
+- A declared function / class / interface from the plan is missing or has a wrong signature.
+- A critical bug (obvious logic error, unreachable code, wrong return type).
+
+DO NOT reject for subjective or cosmetic reasons. In particular, do NOT reject because:
+- Documentation is "incomplete" (missing Contributing / Usage / Examples sections).
+- The language of comments or docs is French instead of English (or vice versa).
+- Formatting, naming preferences, style choices, or comment density.
+- You personally would have structured the code differently.
+- The README could be "more detailed".
+
+If only cosmetic/stylistic issues remain, approve. Tests will catch the rest.
 
 Return ONLY the JSON object.
 """

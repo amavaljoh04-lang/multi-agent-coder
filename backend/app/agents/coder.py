@@ -66,7 +66,18 @@ pass. Only include files you actually modify. Same output format:
 <full updated file content>
 ```
 
-No prose outside fenced blocks. Complete files only, not diffs.
+Rules:
+- Look at the ACTUAL file tree above before changing imports. If a test says
+  `ModuleNotFoundError: No module named 'app.app'`, check whether `app.py`
+  exists at the repo root (flat layout, then use `from app import app`) or
+  inside an `app/` package (then use `from app.main import app` or whatever
+  the real package file is). Decide ONCE, do not flip on every iteration.
+- The sandbox already adds the workspace root to PYTHONPATH, so a flat
+  `module.py` at the root imports as `import module`. Do not add sys.path
+  hacks or conftest.py just to make imports work.
+- If a dependency is missing, add it to requirements.txt (or package.json /
+  Cargo.toml / go.mod) — do not remove the import.
+- No prose outside fenced blocks. Complete files only, not diffs.
 """
 
 

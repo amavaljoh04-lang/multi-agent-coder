@@ -42,7 +42,10 @@ class Sandbox:
         return await self._run_docker(workspace, command)
 
     async def _run_local(self, workspace: Path, command: str) -> RunResult:
-        return await _exec_shell(command, cwd=workspace, timeout=self.cfg.sandbox_timeout)
+        env_prefix = f"PYTHONPATH={shlex.quote(str(workspace.resolve()))}:${{PYTHONPATH:-}} "
+        return await _exec_shell(
+            env_prefix + command, cwd=workspace, timeout=self.cfg.sandbox_timeout
+        )
 
     async def _run_docker(self, workspace: Path, command: str) -> RunResult:
         if shutil.which("docker") is None:
@@ -63,6 +66,10 @@ class Sandbox:
             "-v", f"{workspace}:/work",
             "-e", "PIP_DISABLE_PIP_VERSION_CHECK=1",
             "-e", "PYTHONDONTWRITEBYTECODE=1",
+            # Prepend the workspace to PYTHONPATH so pytest can resolve modules
+            # living at the repo root without requiring every generated project
+            # to ship a pyproject.toml / conftest.py just for this.
+            "-e", "PYTHONPATH=/work",
             image,
             "bash", "-lc", command,
         ]
