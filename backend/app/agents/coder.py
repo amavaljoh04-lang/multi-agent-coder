@@ -40,6 +40,10 @@ Rules:
 """
 
 FIX_PROMPT = """\
+You are the FIXER. Your ONLY job is to apply the SMALLEST possible change to
+make the failing tests pass. You are NOT allowed to redesign, rewrite from
+scratch, or "improve" anything that isn't directly related to the failure.
+
 Project context (JSON):
 ---
 {plan}
@@ -53,31 +57,36 @@ STDOUT:
 STDERR:
 {stderr}
 
-Analyst notes:
+Analyst notes (these identify the root cause — trust them):
 {analysis}
 
 Current files (only those likely to need changes):
 {existing_files_block}
 
-Propose updated versions of the files that need changes to make the tests
-pass. Only include files you actually modify. Same output format:
+Output format — one fenced block per file you modify:
 
 ```path=relative/path.ext
 <full updated file content>
 ```
 
-Rules:
-- Look at the ACTUAL file tree above before changing imports. If a test says
-  `ModuleNotFoundError: No module named 'app.app'`, check whether `app.py`
-  exists at the repo root (flat layout, then use `from app import app`) or
-  inside an `app/` package (then use `from app.main import app` or whatever
-  the real package file is). Decide ONCE, do not flip on every iteration.
-- The sandbox already adds the workspace root to PYTHONPATH, so a flat
-  `module.py` at the root imports as `import module`. Do not add sys.path
-  hacks or conftest.py just to make imports work.
-- If a dependency is missing, add it to requirements.txt (or package.json /
-  Cargo.toml / go.mod) — do not remove the import.
-- No prose outside fenced blocks. Complete files only, not diffs.
+ABSOLUTE RULES (violate any of these and the fix is wrong):
+1. Touch the FEWEST possible files. Ideally 1. Never more than 3 unless the
+   analyst explicitly says so.
+2. Preserve EVERYTHING unrelated to the failure: function signatures, public
+   APIs, docstrings, comments, style, ordering of imports, existing tests.
+3. Do NOT rewrite a file from scratch. Copy the current content verbatim and
+   change ONLY the lines that fix the error.
+4. Do NOT flip between import layouts between iterations. Look at the actual
+   file tree above, decide ONCE what the canonical layout is, and stick to it
+   on every future fix.
+5. The sandbox adds the workspace root to PYTHONPATH. A flat `module.py` at
+   the root imports as `import module`. Do NOT add sys.path hacks,
+   conftest.py, or __init__.py just to make imports work.
+6. Missing dependency → add it to requirements.txt (or package.json /
+   Cargo.toml). Do NOT delete the import.
+7. Do NOT delete tests to make them pass. If a test is wrong, say so in a
+   comment, but prefer fixing the code it tests.
+8. No prose outside fenced blocks. Complete files only, not diffs.
 """
 
 
@@ -141,8 +150,8 @@ async def run_fix(
         analysis=analysis,
         existing_files_block=_fmt_existing(existing_files, limit_chars=60000),
     )
-    text = await router.generate("coder", prompt, system=CODE_SYSTEM, stream_callback=stream_callback)
+    text = await router.generate("fixer", prompt, system=CODE_SYSTEM, stream_callback=stream_callback)
     blocks = extract_code_blocks(text)
     if not blocks:
-        raise ValueError("Coder (fix) did not produce any fenced file blocks")
+        raise ValueError("Fixer did not produce any fenced file blocks")
     return blocks

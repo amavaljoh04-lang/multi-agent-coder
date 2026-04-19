@@ -37,10 +37,20 @@ Produce a JSON object with this exact schema:
 }}
 
 Rules:
-- Every file referenced in tasks MUST be listed in "files".
+- "files" MUST list EVERY file that the final project will contain, WITH NO
+  EXCEPTION. This includes: source files, test files, requirements.txt /
+  pyproject.toml / package.json, README.md, __init__.py for any package
+  directory, config files. A file that is not in this list will NOT be
+  created by the pipeline — missing files cause tests to fail for the wrong
+  reason (ImportError) and waste the fixing loop.
+- Every file referenced in a task MUST be listed in "files". Conversely,
+  every file in "files" MUST be covered by at least one task's "file_paths".
 - Tasks MUST form a DAG (no cycles). Ordered so dependencies come first.
-- Include a test file task when possible (pytest / jest / go test ...).
-- Include a README.md task.
+- ALWAYS include a test file task (pytest / jest / go test ...). Tests run
+  only AFTER all tasks are done and ALL listed files exist on disk, so tests
+  can freely import from any other listed file.
+- ALWAYS include a README.md task and a dependency-manifest task
+  (requirements.txt or equivalent).
 - Do NOT include build artifacts, lockfiles, or binary files.
 - Keep it minimal and runnable. Aim for <= 25 files unless the project truly needs more.
 

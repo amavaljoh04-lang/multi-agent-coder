@@ -255,6 +255,69 @@ class Orchestrator:
                         f"[{task.title}] force-approved after {task.attempts + 1} attempts",
                     )
 
+    async def _gate_all_files_exist(
+        self, project_id: str, plan: dict[str, Any], workspace: Path, stop: asyncio.Event
+    ) -> bool:
+        """Ensure every file listed in plan["files"] actually exists on disk.
+
+        If some are missing, ask the coder to produce just the missing ones
+        (up to 3 rounds). Returns True if all files are present when we exit,
+        False if we gave up.
+        """
+        planned = [
+            f.get("path")
+            for f in plan.get("files", [])
+            if isinstance(f, dict) and f.get("path")
+        ]
+        if not planned:
+            return True
+
+        for attempt in range(3):
+            if stop.is_set():
+                return False
+            missing = [p for p in planned if not (workspace / p).exists()]
+            if not missing:
+                return True
+
+            await self._set_status(project_id, ProjectStatus.CODING)
+            await self.emit(
+                project_id, "warning", "coder",
+                f"Gate: {len(missing)} planned file(s) missing — filling before tests",
+                data={"files": missing},
+            )
+            synthetic_task = {
+                "id": f"gate-fill-{attempt}",
+                "title": "Fill missing planned files",
+                "description": (
+                    "The test gate found that these files listed in the plan do "
+                    "not exist yet. Produce them now with minimal but complete "
+                    "content consistent with the rest of the project."
+                ),
+                "file_paths": missing,
+            }
+            try:
+                existing = await self._collect_files(project_id)
+                blocks = await agents.run_coder(
+                    self.router,
+                    plan=plan,
+                    task=synthetic_task,
+                    existing_files=existing,
+                    stream_callback=self._streamer(project_id, "coder"),
+                )
+                await self._write_files(project_id, workspace, blocks)
+            except Exception as exc:
+                await self.emit(project_id, "error", "coder", f"Gate fill failed: {exc}")
+                await asyncio.sleep(3)
+
+        remaining = [p for p in planned if not (workspace / p).exists()]
+        if remaining:
+            await self.emit(
+                project_id, "warning", "coder",
+                f"Gate: proceeding despite {len(remaining)} missing file(s)",
+                data={"files": remaining},
+            )
+        return True
+
     async def _test_fix_loop(
         self, project_id: str, plan: dict[str, Any], workspace: Path, stop: asyncio.Event
     ) -> None:
@@ -263,6 +326,13 @@ class Orchestrator:
         test_cmd = plan.get("test_command") or ""
         if not test_cmd:
             await self.emit(project_id, "warning", "tester", "No test_command in plan — skipping tests")
+            return
+
+        # Gate: every file listed in the plan must exist on disk before we
+        # bother running pytest. Otherwise tests fail for the wrong reason
+        # (imports of files that were never written) and the fixer wastes
+        # iterations on phantom bugs.
+        if not await self._gate_all_files_exist(project_id, plan, workspace, stop):
             return
 
         iteration = 0

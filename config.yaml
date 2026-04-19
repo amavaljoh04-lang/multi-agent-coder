@@ -67,13 +67,28 @@ roles:
     num_ctx: 16384
 
   # Analyses test failures / stack traces and proposes a fix plan.
+  # NOTE: this role needs strong reasoning on tracebacks, so we use a 14B
+  # reasoning model instead of the old gemma4 (too weak, kept flipping imports).
   tester_analyst:
-    primary: { server: gpu3070, model: "gemma4:latest" }
+    primary: { server: gpu5070, model: "deepseek-r1:14b" }
     fallbacks:
-      - { server: gpu4060, model: "mistral:latest" }
-      - { server: gpu3070, model: "qwen2.5-coder:1.5b" }
+      - { server: gpu5070, model: "deepseek-coder:33b" }
+      - { server: gpu4060, model: "qwen2.5-coder:14b" }
+      - { server: gpu3070, model: "gemma4:latest" }
     temperature: 0.1
-    num_ctx: 8192
+    num_ctx: 12288
+
+  # Dedicated fixer: applies the smallest possible patch given an analyst
+  # report and the current file tree. Separated from `coder` so we can use a
+  # lower temperature and a much stricter prompt — the coder writes new code
+  # from a spec, the fixer edits existing code without rewriting it.
+  fixer:
+    primary: { server: gpu5070, model: "deepseek-coder:33b" }
+    fallbacks:
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
+    temperature: 0.0
+    num_ctx: 16384
 
   # Cheap dispatcher / classification tasks.
   dispatcher:
