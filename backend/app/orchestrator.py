@@ -25,6 +25,7 @@ stopped):
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import datetime as dt
 import logging
 import shutil
@@ -68,6 +69,20 @@ class Orchestrator:
         if project_id in self._stop:
             self._stop[project_id].set()
         await self._set_status(project_id, ProjectStatus.PAUSED)
+
+    async def cancel(self, project_id: str) -> None:
+        """Hard-stop a project's worker without persisting a PAUSED status
+        (used by delete)."""
+        stop = self._stop.get(project_id)
+        if stop is not None:
+            stop.set()
+        task = self._tasks.get(project_id)
+        if task is not None and not task.done():
+            task.cancel()
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await task
+        self._tasks.pop(project_id, None)
+        self._stop.pop(project_id, None)
 
     async def resume_all(self) -> None:
         """Re-enqueue any project that was running when the server last died."""

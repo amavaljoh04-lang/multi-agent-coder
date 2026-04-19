@@ -55,10 +55,36 @@ async function refreshProjects() {
     const li = document.createElement("li");
     li.className = "project-item" + (p.id === state.currentId ? " active" : "");
     li.innerHTML = `<div class="name">${escape(p.name)}</div>
-      <div class="status">${escape(p.status)} · ${new Date(p.created_at).toLocaleString()}</div>`;
-    li.onclick = () => openProject(p.id);
+      <div class="status">${escape(p.status)} · ${new Date(p.created_at).toLocaleString()}</div>
+      <button class="del" title="Supprimer cette mission">×</button>`;
+    li.addEventListener("click", (e) => {
+      if (e.target.classList.contains("del")) return;
+      openProject(p.id);
+    });
+    li.querySelector(".del").addEventListener("click", async (e) => {
+      e.stopPropagation();
+      if (!confirm(`Supprimer définitivement « ${p.name} » ? Workspace et ZIP seront effacés.`)) return;
+      await deleteProject(p.id);
+    });
     el.appendChild(li);
   }
+  const count = document.getElementById("projects-count");
+  if (count) count.textContent = state.projects.length;
+}
+
+async function deleteProject(id) {
+  const r = await fetch(`/api/projects/${id}`, { method: "DELETE" });
+  if (!r.ok) {
+    alert("Suppression échouée");
+    return;
+  }
+  if (state.currentId === id) {
+    state.currentId = null;
+    if (state.ws) { try { state.ws.close(); } catch {} state.ws = null; }
+    $("project-view").classList.add("hidden");
+    $("empty-state").classList.remove("hidden");
+  }
+  await refreshProjects();
 }
 
 // ---------- open + subscribe ------------------------------------------------
@@ -342,6 +368,13 @@ $("btn-resume").addEventListener("click", async () => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action: "resume" }),
   });
+});
+$("btn-delete").addEventListener("click", async () => {
+  if (!state.currentId) return;
+  const current = state.projects.find((p) => p.id === state.currentId);
+  const label = current ? current.name : state.currentId;
+  if (!confirm(`Supprimer définitivement « ${label} » ? Workspace et ZIP seront effacés.`)) return;
+  await deleteProject(state.currentId);
 });
 
 function escape(s) {

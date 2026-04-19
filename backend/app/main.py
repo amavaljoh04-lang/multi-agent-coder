@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -187,6 +188,33 @@ async def get_file_content(project_id: str, file_path: str) -> JSONResponse:
         if rows is None:
             raise HTTPException(404, "File not found")
         return JSONResponse({"path": rows.path, "content": rows.content, "revision": rows.revision})
+
+
+@app.delete("/api/projects/{project_id}")
+async def delete_project(project_id: str) -> dict:
+    orch = get_orchestrator()
+    await orch.cancel(project_id)
+    async with SessionLocal() as s:
+        project = await s.get(Project, project_id)
+        if project is None:
+            raise HTTPException(404, "Project not found")
+        workspace_path = project.workspace_path
+        zip_path = project.zip_path
+        await s.delete(project)
+        await s.commit()
+    # Best-effort filesystem cleanup (workspace dir + ZIP).
+    for p in (workspace_path, zip_path):
+        if not p:
+            continue
+        path = Path(p)
+        try:
+            if path.is_dir():
+                shutil.rmtree(path, ignore_errors=True)
+            elif path.exists():
+                path.unlink(missing_ok=True)
+        except OSError as exc:
+            log.warning("cleanup of %s failed: %s", p, exc)
+    return {"ok": True}
 
 
 @app.post("/api/projects/{project_id}/control")

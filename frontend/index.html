@@ -3,16 +3,31 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Multi-Agent Coder</title>
+    <title>M.A.C. // Multi-Agent Coder</title>
+    <link
+      rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;600;700;800&family=Share+Tech+Mono&family=JetBrains+Mono:wght@400;500;700&display=swap"
+    />
     <link rel="stylesheet" href="/assets/style.css" />
   </head>
   <body>
+    <!-- decorative layers -->
+    <div class="grid-bg" aria-hidden="true"></div>
+    <div class="scanlines" aria-hidden="true"></div>
+    <div class="vignette" aria-hidden="true"></div>
+
     <header class="topbar">
       <div class="brand">
-        <span class="logo">⚙︎</span>
+        <div class="logo-hex" aria-hidden="true">
+          <svg viewBox="0 0 40 44" width="38" height="42">
+            <polygon points="20,2 37,12 37,32 20,42 3,32 3,12" fill="none" stroke="currentColor" stroke-width="1.5"/>
+            <polygon points="20,9 30,15 30,29 20,35 10,29 10,15" fill="none" stroke="currentColor" stroke-width="1" opacity="0.55"/>
+            <circle cx="20" cy="22" r="3" fill="currentColor"/>
+          </svg>
+        </div>
         <div>
-          <div class="brand-title">MULTI-AGENT CODER</div>
-          <div class="brand-sub">Ollama swarm · 5070 / 4060 / 3070</div>
+          <div class="brand-title">M<span class="dot-sep">·</span>A<span class="dot-sep">·</span>C<span class="sys-sub">/swarm</span></div>
+          <div class="brand-sub">MULTI-AGENT CODER · OLLAMA NEURAL SWARM</div>
         </div>
       </div>
       <div id="servers" class="servers"></div>
@@ -20,38 +35,49 @@
 
     <main class="shell">
       <aside class="sidebar">
-        <div class="panel">
-          <div class="panel-title">Nouveau projet</div>
+        <div class="panel with-corners">
+          <div class="panel-title">
+            <span>// New directive</span>
+            <span class="blink">▶</span>
+          </div>
           <form id="new-project" class="form">
-            <label>Nom du projet</label>
-            <input id="proj-name" type="text" placeholder="api-todo-fastapi" required />
-            <label>Description / cahier des charges</label>
-            <textarea id="proj-prompt" rows="8" placeholder="Crée une API FastAPI avec auth JWT, endpoints CRUD pour des todos, tests pytest, et un Dockerfile." required></textarea>
-            <button type="submit" class="btn primary">Lancer le swarm</button>
+            <label>Designation</label>
+            <input id="proj-name" type="text" placeholder="project-alpha" required />
+            <label>Mission briefing</label>
+            <textarea id="proj-prompt" rows="8" placeholder="Décrivez la mission : stack, endpoints, tests attendus, contraintes…" required></textarea>
+            <button type="submit" class="btn primary">
+              <span class="btn-label">Deploy swarm</span>
+              <span class="btn-chev">››</span>
+            </button>
           </form>
         </div>
 
-        <div class="panel">
-          <div class="panel-title">Projets</div>
+        <div class="panel with-corners">
+          <div class="panel-title">
+            <span>// Missions</span>
+            <span id="projects-count" class="chip-count">0</span>
+          </div>
           <ul id="projects" class="projects"></ul>
         </div>
       </aside>
 
       <section class="workbench">
         <div id="empty-state" class="empty-state">
-          <h1>Bienvenue.</h1>
-          <p>Décrivez un projet à gauche, le swarm de 3 GPU Ollama s'en occupe : plan → code → review → tests en boucle jusqu'au ZIP final.</p>
+          <div class="boot-line">[ SYSTEM READY ]</div>
+          <h1>NEURAL&nbsp;SWARM ONLINE</h1>
+          <p>Trois GPU en réseau. Cinq rôles autonomes. Boucle d'auto-correction illimitée jusqu'au livrable final.</p>
           <ul class="pipeline">
-            <li><span class="dot dot-plan"></span>Planner <em>(deepseek-r1:14b · 5070)</em></li>
-            <li><span class="dot dot-arch"></span>Architect <em>(kimi-k2.5:cloud · 5070)</em></li>
-            <li><span class="dot dot-code"></span>Coder <em>(qwen2.5-coder:14b · 5070)</em></li>
-            <li><span class="dot dot-review"></span>Reviewer <em>(deepseek-r1:14b · 5070)</em></li>
-            <li><span class="dot dot-test"></span>Tester <em>(gemma4 · 3070)</em></li>
+            <li><span class="pdot pd-plan"></span><strong>Planner</strong><em>deepseek-r1:14b · 5070</em></li>
+            <li><span class="pdot pd-arch"></span><strong>Architect</strong><em>kimi-k2.5:cloud · 5070</em></li>
+            <li><span class="pdot pd-code"></span><strong>Coder</strong><em>qwen2.5-coder:14b · 5070</em></li>
+            <li><span class="pdot pd-review"></span><strong>Reviewer</strong><em>deepseek-r1:14b · 5070</em></li>
+            <li><span class="pdot pd-test"></span><strong>Analyst</strong><em>gemma4 · 3070</em></li>
           </ul>
+          <div class="boot-line dim">[ AWAITING DIRECTIVE ]</div>
         </div>
 
         <div id="project-view" class="project-view hidden">
-          <header class="project-header">
+          <header class="project-header with-corners">
             <div>
               <h2 id="proj-title">—</h2>
               <div class="muted" id="proj-meta">—</div>
@@ -60,25 +86,26 @@
               <span id="proj-status" class="status-pill">—</span>
               <button id="btn-pause" class="btn">Pause</button>
               <button id="btn-resume" class="btn">Reprendre</button>
-              <a id="btn-zip" class="btn success" href="#" download>Télécharger ZIP</a>
+              <a id="btn-zip" class="btn success hidden" href="#" download>⬇ ZIP</a>
+              <button id="btn-delete" class="btn danger">Supprimer</button>
             </div>
           </header>
 
           <div class="grid">
-            <div class="panel col-tasks">
-              <div class="panel-title">Tâches</div>
+            <div class="panel col-tasks with-corners">
+              <div class="panel-title"><span>// Tasks</span></div>
               <ul id="tasks" class="tasks"></ul>
             </div>
 
-            <div class="panel col-logs">
-              <div class="panel-title">Activité live</div>
+            <div class="panel col-logs with-corners">
+              <div class="panel-title"><span>// Live activity</span><span class="blink">●</span></div>
               <div id="agents-live" class="agents-live"></div>
-              <div class="sub-title">Événements</div>
+              <div class="sub-title">// Événements</div>
               <div id="logs" class="logs"></div>
             </div>
 
-            <div class="panel col-files">
-              <div class="panel-title">Fichiers générés</div>
+            <div class="panel col-files with-corners">
+              <div class="panel-title"><span>// Artifacts</span></div>
               <ul id="files" class="files"></ul>
               <pre id="file-preview" class="file-preview"></pre>
             </div>
