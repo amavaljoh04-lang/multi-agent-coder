@@ -1,10 +1,9 @@
 # Multi-Agent Coder — configuration
 #
-# This file wires the 3 Ollama servers to the roles used by the orchestrator.
-# Each role has a primary pick and a list of fallbacks that will be tried in
-# order if the primary server is down, overloaded, or returns errors.
-#
-# Server URLs are plain HTTP Ollama endpoints (the default port is 11434).
+# Strict model list: we only keep models proven to produce working code on
+# this hardware. Small (< 14B) models and cloud models have been removed so
+# the pipeline never silently falls back to a weak model that produces
+# broken output.
 
 servers:
   gpu5070:
@@ -20,119 +19,83 @@ servers:
     label: "RTX 3070"
     concurrency: 2
 
+# Only two coding-capable models are used in the whole pipeline:
+#   * deepseek-coder:33b  — primary for code + fix work
+#   * qwen2.5-coder:14b   — fallback for code + fix work
+#   * deepseek-r1:14b     — reasoning (planner / architect / reviewer / analyst)
+# If none of these are reachable, the pipeline fails fast rather than
+# falling back to a weak model.
 roles:
   # Splits the project into atomic tasks, produces the plan.
   planner:
     primary: { server: gpu5070, model: "deepseek-r1:14b" }
     fallbacks:
-      - { server: gpu5070, model: "glm-5.1:cloud" }
+      - { server: gpu5070, model: "deepseek-coder:33b" }
       - { server: gpu5070, model: "qwen2.5-coder:14b" }
     temperature: 0.2
     num_ctx: 16384
 
-  # Produces the high level architecture (file tree, specs, interfaces).
+  # High-level architecture: file tree, specs, interfaces.
   architect:
-    primary: { server: gpu5070, model: "kimi-k2.5:cloud" }
+    primary: { server: gpu5070, model: "deepseek-r1:14b" }
     fallbacks:
-      - { server: gpu5070, model: "deepseek-r1:14b" }
-      - { server: gpu5070, model: "glm-5.1:cloud" }
+      - { server: gpu5070, model: "deepseek-coder:33b" }
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
     temperature: 0.3
-    num_ctx: 32768
+    num_ctx: 16384
 
   # Main code writer.
   coder:
-    primary: { server: gpu5070, model: "qwen2.5-coder:14b" }
-    fallbacks:
-      - { server: gpu5070, model: "deepseek-coder:33b" }
-      - { server: gpu4060, model: "qwen2.5-coder:7b" }
-    temperature: 0.15
-    num_ctx: 16384
-
-  # Parallel coder for independent files, runs on a second server.
-  coder_parallel:
-    primary: { server: gpu4060, model: "qwen2.5-coder:7b" }
-    fallbacks:
-      - { server: gpu3070, model: "deepseek-coder:6.7b" }
-      - { server: gpu5070, model: "qwen2.5-coder:7b" }
-    temperature: 0.15
-    num_ctx: 12288
-
-  # Language-specialised coders. The orchestrator picks one of these
-  # based on the file extensions in the task (fallback to `coder` when
-  # the language is mixed or unknown). Having a dedicated model per
-  # language means we stop trying to coax a Python model into writing
-  # idiomatic Rust, and vice versa.
-  coder_py:
     primary: { server: gpu5070, model: "deepseek-coder:33b" }
     fallbacks:
       - { server: gpu5070, model: "qwen2.5-coder:14b" }
-      - { server: gpu4060, model: "qwen2.5-coder:7b" }
-    temperature: 0.1
-    num_ctx: 16384
-  coder_web:
-    primary: { server: gpu5070, model: "qwen2.5-coder:14b" }
-    fallbacks:
-      - { server: gpu4060, model: "qwen2.5-coder:7b" }
-      - { server: gpu5070, model: "deepseek-coder:33b" }
+      - { server: gpu4060, model: "qwen2.5-coder:14b" }
     temperature: 0.15
-    num_ctx: 16384
-  coder_rust:
-    primary: { server: gpu5070, model: "deepseek-coder:33b" }
-    fallbacks:
-      - { server: gpu5070, model: "qwen2.5-coder:14b" }
-    temperature: 0.1
-    num_ctx: 16384
-  coder_go:
-    primary: { server: gpu5070, model: "deepseek-coder:33b" }
-    fallbacks:
-      - { server: gpu5070, model: "qwen2.5-coder:14b" }
-    temperature: 0.1
     num_ctx: 16384
 
   # Reviews code written by the coder (different base model for diversity).
   reviewer:
     primary: { server: gpu5070, model: "deepseek-r1:14b" }
     fallbacks:
-      - { server: gpu4060, model: "qwen2.5:7b-instruct-q4_K_M" }
       - { server: gpu5070, model: "deepseek-coder:33b" }
+      - { server: gpu4060, model: "qwen2.5-coder:14b" }
     temperature: 0.1
     num_ctx: 16384
 
   # Analyses test failures / stack traces and proposes a fix plan.
-  # NOTE: this role needs strong reasoning on tracebacks, so we use a 14B
-  # reasoning model instead of the old gemma4 (too weak, kept flipping imports).
   tester_analyst:
     primary: { server: gpu5070, model: "deepseek-r1:14b" }
     fallbacks:
       - { server: gpu5070, model: "deepseek-coder:33b" }
       - { server: gpu4060, model: "qwen2.5-coder:14b" }
-      - { server: gpu3070, model: "gemma4:latest" }
     temperature: 0.1
     num_ctx: 12288
 
   # Dedicated fixer: applies the smallest possible patch given an analyst
-  # report and the current file tree. Separated from `coder` so we can use a
-  # lower temperature and a much stricter prompt — the coder writes new code
-  # from a spec, the fixer edits existing code without rewriting it.
+  # report. Separated from `coder` so we can use temperature 0 and a
+  # stricter prompt — the coder writes new code, the fixer edits existing
+  # code without rewriting it.
   fixer:
     primary: { server: gpu5070, model: "deepseek-coder:33b" }
     fallbacks:
       - { server: gpu5070, model: "qwen2.5-coder:14b" }
-      - { server: gpu4060, model: "qwen2.5-coder:7b" }
+      - { server: gpu4060, model: "qwen2.5-coder:14b" }
     temperature: 0.0
     num_ctx: 16384
 
   # Cheap dispatcher / classification tasks.
+  # Uses qwen2.5-coder:14b too — we'd rather spend a few extra seconds than
+  # let a 1.5B model misclassify.
   dispatcher:
-    primary: { server: gpu3070, model: "qwen2.5-coder:1.5b" }
+    primary: { server: gpu4060, model: "qwen2.5-coder:14b" }
     fallbacks:
-      - { server: gpu3070, model: "gemma4:latest" }
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
     temperature: 0.0
     num_ctx: 4096
 
 orchestrator:
-  # Max number of test/fix iterations per project (-1 = infinite, runs for
-  # weeks if needed — the user explicitly asked for this).
+  # Max number of test/fix iterations per project (-1 = unlimited, bounded
+  # only by max_wall_seconds).
   max_iterations: -1
   # Max retries when a file fails review before escalating back to the planner.
   max_review_retries: 5
@@ -144,9 +107,10 @@ orchestrator:
   sandbox_image: "python:3.12-slim"
   # Hard timeout for a single test run inside the sandbox (seconds).
   sandbox_timeout: 600
-  # How many coder tasks may run concurrently (each on a different GPU).
-  # With 3 Ollama servers, 2-3 is the sweet spot.
-  parallel_coders: 2
+  # How many coder tasks may run concurrently. 1 = sequential (safest, one
+  # strong model gets full VRAM). Bump to 2 if you want to trade a bit of
+  # quality for parallelism.
+  parallel_coders: 1
   # Absolute wall-clock budget per project, in seconds. -1 = unlimited.
   # Typical values: 3600 = 1h, 86400 = 1 day, 604800 = 1 week.
   max_wall_seconds: -1

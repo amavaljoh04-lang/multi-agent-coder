@@ -3,24 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>M·A·C — neural swarm</title>
-    <link
-      rel="stylesheet"
-      href="https://fonts.googleapis.com/css2?family=Orbitron:wght@500;700;800&family=Share+Tech+Mono&display=swap"
-    />
+    <title>Multi-Agent Coder</title>
     <link rel="stylesheet" href="/assets/style.css" />
   </head>
   <body>
     <header class="topbar">
       <div class="brand">
-        <svg class="brand-mark" viewBox="0 0 40 44" width="28" height="32" aria-hidden="true">
-          <polygon points="20,2 37,12 37,32 20,42 3,32 3,12" fill="none" stroke="currentColor" stroke-width="1.5"/>
-          <circle cx="20" cy="22" r="3" fill="currentColor"/>
-        </svg>
-        <div class="brand-text">
-          <span class="brand-title">M·A·C</span>
-          <span class="brand-sub">neural swarm</span>
-        </div>
+        <span class="brand-title">Multi-Agent Coder</span>
+        <span class="brand-sub">local autonomous pipeline</span>
       </div>
       <div id="servers" class="servers"></div>
       <button id="btn-menu" class="btn-menu" aria-label="menu">☰</button>
@@ -29,17 +19,17 @@
     <main class="shell">
       <aside class="sidebar" id="sidebar">
         <section class="card">
-          <header class="card-head">New directive</header>
+          <header class="card-head">Nouveau projet</header>
           <form id="new-project" class="form">
-            <input id="proj-name" type="text" placeholder="designation (ex. url-shortener)" required />
-            <textarea id="proj-prompt" rows="7" placeholder="Mission briefing : stack, endpoints, tests, contraintes…" required></textarea>
-            <button type="submit" class="btn primary">Deploy swarm</button>
+            <input id="proj-name" type="text" placeholder="nom (ex. url-shortener)" required />
+            <textarea id="proj-prompt" rows="7" placeholder="Spécification : stack, endpoints, tests, contraintes…" required></textarea>
+            <button type="submit" class="btn primary">Lancer</button>
           </form>
         </section>
 
         <section class="card">
           <header class="card-head">
-            <span>Missions</span>
+            <span>Projets</span>
             <span id="projects-count" class="chip">0</span>
           </header>
           <ul id="projects" class="projects"></ul>
@@ -47,13 +37,11 @@
       </aside>
 
       <section class="stage">
-        <!-- empty state (idle) -->
+        <!-- empty state (no project selected) -->
         <div id="empty-state" class="empty-state">
-          <canvas id="idle-graph" class="idle-graph"></canvas>
-          <div class="idle-overlay">
-            <div class="idle-line">awaiting directive</div>
-            <h1>NEURAL SWARM</h1>
-            <p>Six agents autonomes. Trois GPU. Boucle d'auto-correction illimitée.</p>
+          <div class="empty-inner">
+            <h1>Multi-Agent Coder</h1>
+            <p>Sélectionne un projet existant ou crée-en un nouveau pour démarrer le pipeline.</p>
           </div>
         </div>
 
@@ -67,26 +55,20 @@
             <div class="proj-actions">
               <button id="btn-pause" class="btn-icon" title="Pause">❚❚</button>
               <button id="btn-resume" class="btn-icon" title="Reprendre">▶</button>
-              <a id="btn-zip" class="btn-icon zip hidden" href="#" download title="Télécharger ZIP">⬇</a>
+              <a id="btn-zip" class="btn-icon zip hidden" href="#" download title="Télécharger ZIP">⬇ ZIP</a>
               <button id="btn-delete" class="btn-icon danger" title="Supprimer">✕</button>
             </div>
           </header>
 
-          <!-- neural graph canvas -->
-          <div class="graph-wrap">
-            <canvas id="graph" class="graph"></canvas>
-            <div id="graph-overlay" class="graph-overlay">
-              <div id="current-action" class="current-action">—</div>
-              <div id="graph-legend" class="graph-legend"></div>
-            </div>
+          <div class="status-bar">
+            <span id="current-action" class="current-action">En attente…</span>
           </div>
 
-          <!-- live file streaming + tasks + events + artifacts as drawers -->
           <nav class="drawers">
-            <button class="drawer-tab active" data-tab="stream">Stream<span id="stream-count" class="chip">0</span></button>
-            <button class="drawer-tab" data-tab="tasks">Tasks<span id="tasks-count" class="chip">0</span></button>
-            <button class="drawer-tab" data-tab="events">Events<span id="events-count" class="chip">0</span></button>
-            <button class="drawer-tab" data-tab="files">Artifacts<span id="files-count" class="chip">0</span></button>
+            <button class="drawer-tab active" data-tab="stream">Fichiers<span id="stream-count" class="chip">0</span></button>
+            <button class="drawer-tab" data-tab="tasks">Tâches<span id="tasks-count" class="chip">0</span></button>
+            <button class="drawer-tab" data-tab="events">Journal<span id="events-count" class="chip">0</span></button>
+            <button class="drawer-tab" data-tab="files">Livrables<span id="files-count" class="chip">0</span></button>
           </nav>
 
           <div class="drawer-body">
@@ -104,10 +86,9 @@
             </div>
             <div id="pane-files" class="pane">
               <a id="zip-banner" class="zip-banner hidden" href="#" download>
-                <span class="zip-banner-icon">⬇</span>
                 <span class="zip-banner-body">
                   <span class="zip-banner-title">Télécharger le ZIP du projet</span>
-                  <span class="zip-banner-sub">Livraison complète, tests passés</span>
+                  <span class="zip-banner-sub">Livraison complète</span>
                 </span>
               </a>
               <ul id="files" class="files"></ul>
