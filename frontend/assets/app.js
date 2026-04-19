@@ -1,19 +1,6 @@
-// Multi-Agent Coder — vanilla JS frontend.
-// Keeps things simple: fetch + WebSocket, no build step.
+/* Multi-Agent Coder — UI client + neural-graph visualization. */
 
 const $ = (id) => document.getElementById(id);
-
-const state = {
-  currentId: null,
-  ws: null,
-  projects: [],
-  tokenBuffers: {}, // role -> string, for streamed tokens
-  seenEvents: new Set(), // dedupe replay on WebSocket reconnect
-  agentRows: {}, // role -> DOM node (in-place "current activity" line)
-  lastLogKey: null, // (kind|role|message) of last appended event, to collapse repeats
-  lastLogCountEl: null,
-  lastLogCount: 1,
-};
 
 const ROLE_LABEL = {
   planner: "Planner",
@@ -24,86 +11,482 @@ const ROLE_LABEL = {
   analyst: "Analyst",
 };
 
-// ---------- server status ---------------------------------------------------
+const ROLE_COLORS = {
+  planner: "#a78bfa",
+  architect: "#38bdf8",
+  coder: "#5eead4",
+  reviewer: "#fbbf24",
+  tester: "#4ade80",
+  analyst: "#ff3ea5",
+};
+
+const state = {
+  projects: [],
+  currentId: null,
+  ws: null,
+  seenEvents: new Set(),
+  lastLogKey: null,
+  lastLogCount: 1,
+  lastLogCountEl: null,
+  eventCount: 0,
+  graph: null,
+  idleGraph: null,
+};
+
+// ============================================================================
+// Neural graph engine
+// ============================================================================
+
+class NeuralGraph {
+  /**
+   * Interactive neural-network visualization.
+   * @param {HTMLCanvasElement} canvas
+   * @param {object} opts
+   */
+  constructor(canvas, opts = {}) {
+    this.canvas = canvas;
+    this.ctx = canvas.getContext("2d");
+    this.idle = !!opts.idle;
+    this.nodes = []; // agent nodes
+    this.ambient = []; // background particles
+    this.edges = [];
+    this.particles = []; // flowing impulses on edges
+    this.size = { w: 0, h: 0 };
+    this.raf = null;
+
+    // Fixed normalized positions (0-1). Re-projected to pixels each frame.
+    this._layout = [
+      { key: "planner",   label: "Planner",   x: 0.18, y: 0.22 },
+      { key: "architect", label: "Architect", x: 0.55, y: 0.12 },
+      { key: "coder",     label: "Coder",     x: 0.5,  y: 0.5  },
+      { key: "reviewer",  label: "Reviewer",  x: 0.85, y: 0.38 },
+      { key: "tester",    label: "Tester",    x: 0.82, y: 0.78 },
+      { key: "analyst",   label: "Analyst",   x: 0.18, y: 0.75 },
+    ];
+    this._edgeDefs = [
+      ["planner", "architect"],
+      ["architect", "coder"],
+      ["coder", "reviewer"],
+      ["reviewer", "coder"],
+      ["coder", "tester"],
+      ["tester", "analyst"],
+      ["analyst", "coder"],
+      ["planner", "coder"],
+    ];
+
+    this._build();
+    this._onResize = this._onResize.bind(this);
+    window.addEventListener("resize", this._onResize);
+    this._onResize();
+    this.start();
+
+    // Ambient firing (always on, soft).
+    this._ambientTimer = setInterval(() => this._maybeAmbientFire(), 260);
+  }
+
+  destroy() {
+    cancelAnimationFrame(this.raf);
+    clearInterval(this._ambientTimer);
+    window.removeEventListener("resize", this._onResize);
+  }
+
+  _build() {
+    // Agent nodes.
+    for (const n of this._layout) {
+      this.nodes.push({
+        ...n,
+        color: ROLE_COLORS[n.key] || "#5eead4",
+        activity: 0, // 0-1 decaying
+        radius: 22,
+        orbit: Math.random() * Math.PI * 2,
+      });
+    }
+    // Edges with directed information.
+    for (const [a, b] of this._edgeDefs) {
+      this.edges.push({ a, b, flow: 0 });
+    }
+    // Ambient "background neurons".
+    const N = this.idle ? 110 : 65;
+    for (let i = 0; i < N; i++) {
+      this.ambient.push({
+        x: Math.random(),
+        y: Math.random(),
+        r: 0.5 + Math.random() * 1.2,
+        vx: (Math.random() - 0.5) * 0.00015,
+        vy: (Math.random() - 0.5) * 0.00015,
+        phase: Math.random() * Math.PI * 2,
+        fire: 0,
+      });
+    }
+  }
+
+  _onResize() {
+    const rect = this.canvas.getBoundingClientRect();
+    const dpr = window.devicePixelRatio || 1;
+    this.canvas.width = Math.max(1, Math.floor(rect.width * dpr));
+    this.canvas.height = Math.max(1, Math.floor(rect.height * dpr));
+    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    this.size = { w: rect.width, h: rect.height };
+  }
+
+  _pos(n) {
+    return { x: n.x * this.size.w, y: n.y * this.size.h };
+  }
+  _node(key) { return this.nodes.find((n) => n.key === key); }
+
+  _maybeAmbientFire() {
+    if (Math.random() < 0.7) {
+      const i = (Math.random() * this.ambient.length) | 0;
+      this.ambient[i].fire = 1;
+    }
+    // In idle mode, softly fire random agent nodes to keep it alive.
+    if (this.idle && Math.random() < 0.35) {
+      const n = this.nodes[(Math.random() * this.nodes.length) | 0];
+      this.pulse(n.key, 0.5);
+      if (Math.random() < 0.5) {
+        const e = this.edges[(Math.random() * this.edges.length) | 0];
+        this.emit(e.a, e.b);
+      }
+    }
+  }
+
+  /** Register an activity on a role: glow + spawn a few particles from its predecessors. */
+  pulse(roleKey, intensity = 1) {
+    const node = this._node(roleKey);
+    if (!node) return;
+    node.activity = Math.min(1, node.activity + intensity);
+    for (const e of this.edges) {
+      if (e.b === roleKey) {
+        e.flow = Math.min(1, e.flow + 0.8 * intensity);
+      }
+    }
+  }
+
+  /** Emit a single particle along a directed edge. */
+  emit(fromKey, toKey, color) {
+    const from = this._node(fromKey);
+    const to = this._node(toKey);
+    if (!from || !to) return;
+    this.particles.push({
+      from,
+      to,
+      t: 0,
+      speed: 0.008 + Math.random() * 0.006,
+      color: color || to.color,
+      size: 2 + Math.random() * 1.4,
+    });
+  }
+
+  /** Record a state transition: animate the expected pipeline edge. */
+  transition(status) {
+    const map = {
+      planning:     [[null, "planner"]],
+      architecting: [["planner", "architect"]],
+      coding:       [["architect", "coder"]],
+      reviewing:    [["coder", "reviewer"]],
+      testing:      [["coder", "tester"]],
+      fixing:       [["tester", "analyst"], ["analyst", "coder"]],
+      packaging:    [["coder", "tester"]],
+    };
+    const pairs = map[status] || [];
+    for (const [a, b] of pairs) {
+      if (a) {
+        for (let i = 0; i < 5; i++) {
+          setTimeout(() => this.emit(a, b), i * 80);
+        }
+        this.pulse(a, 0.3);
+      }
+      this.pulse(b, 0.9);
+    }
+  }
+
+  start() {
+    const loop = () => {
+      this._draw();
+      this.raf = requestAnimationFrame(loop);
+    };
+    loop();
+  }
+
+  _draw() {
+    const { ctx } = this;
+    const { w, h } = this.size;
+    if (w === 0 || h === 0) return;
+    ctx.clearRect(0, 0, w, h);
+
+    // Ambient neurons.
+    for (const p of this.ambient) {
+      p.x = (p.x + p.vx + 1) % 1;
+      p.y = (p.y + p.vy + 1) % 1;
+      p.phase += 0.02;
+      const x = p.x * w;
+      const y = p.y * h;
+      const base = 0.22 + 0.18 * Math.sin(p.phase);
+      const glow = p.fire;
+      ctx.fillStyle = `rgba(120, 180, 220, ${base * 0.4})`;
+      ctx.beginPath();
+      ctx.arc(x, y, p.r, 0, Math.PI * 2);
+      ctx.fill();
+      if (glow > 0.02) {
+        ctx.fillStyle = `rgba(94, 234, 212, ${glow * 0.8})`;
+        ctx.beginPath();
+        ctx.arc(x, y, p.r + glow * 2.2, 0, Math.PI * 2);
+        ctx.fill();
+        p.fire *= 0.9;
+      }
+    }
+
+    // Ambient faint connection web to nearest 2 neighbours (decorative).
+    ctx.strokeStyle = "rgba(94, 234, 212, 0.05)";
+    ctx.lineWidth = 0.6;
+    for (let i = 0; i < this.ambient.length; i++) {
+      for (let j = i + 1; j < Math.min(i + 4, this.ambient.length); j++) {
+        const a = this.ambient[i];
+        const b = this.ambient[j];
+        const dx = (a.x - b.x) * w;
+        const dy = (a.y - b.y) * h;
+        const d = Math.hypot(dx, dy);
+        if (d < 110) {
+          ctx.beginPath();
+          ctx.moveTo(a.x * w, a.y * h);
+          ctx.lineTo(b.x * w, b.y * h);
+          ctx.stroke();
+        }
+      }
+    }
+
+    // Main edges.
+    for (const e of this.edges) {
+      const a = this._node(e.a);
+      const b = this._node(e.b);
+      const pa = this._pos(a);
+      const pb = this._pos(b);
+      const baseAlpha = 0.14;
+      const flowAlpha = 0.55 * e.flow;
+      const grad = ctx.createLinearGradient(pa.x, pa.y, pb.x, pb.y);
+      grad.addColorStop(0, this._rgba(a.color, baseAlpha + flowAlpha));
+      grad.addColorStop(1, this._rgba(b.color, baseAlpha + flowAlpha));
+      ctx.strokeStyle = grad;
+      ctx.lineWidth = 1.2 + 1.8 * e.flow;
+      ctx.beginPath();
+      ctx.moveTo(pa.x, pa.y);
+      ctx.lineTo(pb.x, pb.y);
+      ctx.stroke();
+      e.flow *= 0.96;
+    }
+
+    // Particles.
+    this.particles = this.particles.filter((p) => p.t <= 1);
+    for (const p of this.particles) {
+      p.t += p.speed;
+      const pa = this._pos(p.from);
+      const pb = this._pos(p.to);
+      const x = pa.x + (pb.x - pa.x) * p.t;
+      const y = pa.y + (pb.y - pa.y) * p.t;
+      ctx.fillStyle = this._rgba(p.color, 0.95);
+      ctx.beginPath();
+      ctx.arc(x, y, p.size, 0, Math.PI * 2);
+      ctx.fill();
+      // soft trail
+      ctx.fillStyle = this._rgba(p.color, 0.18);
+      ctx.beginPath();
+      ctx.arc(x, y, p.size * 4, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Agent nodes.
+    for (const n of this.nodes) {
+      const p = this._pos(n);
+      n.orbit += 0.025 + n.activity * 0.06;
+
+      // outer halo
+      const halo = 0.2 + 0.55 * n.activity;
+      const rOuter = n.radius + 18 + 12 * n.activity;
+      const g = ctx.createRadialGradient(p.x, p.y, n.radius * 0.3, p.x, p.y, rOuter);
+      g.addColorStop(0, this._rgba(n.color, halo));
+      g.addColorStop(1, this._rgba(n.color, 0));
+      ctx.fillStyle = g;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, rOuter, 0, Math.PI * 2);
+      ctx.fill();
+
+      // orbit ring (decorative)
+      ctx.strokeStyle = this._rgba(n.color, 0.15 + n.activity * 0.45);
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, n.radius + 8, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // rotating dashes when active
+      if (n.activity > 0.05) {
+        ctx.save();
+        ctx.translate(p.x, p.y);
+        ctx.rotate(n.orbit);
+        ctx.strokeStyle = this._rgba(n.color, 0.6 * n.activity);
+        ctx.lineWidth = 2;
+        ctx.setLineDash([4, 10]);
+        ctx.beginPath();
+        ctx.arc(0, 0, n.radius + 6, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.restore();
+      }
+
+      // core
+      ctx.fillStyle = "rgba(3, 6, 13, 1)";
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, n.radius, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.strokeStyle = this._rgba(n.color, 0.8 + n.activity * 0.2);
+      ctx.lineWidth = 1.5 + n.activity * 1.5;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, n.radius, 0, Math.PI * 2);
+      ctx.stroke();
+
+      // inner dot
+      ctx.fillStyle = this._rgba(n.color, 0.55 + n.activity * 0.45);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, 3 + 2 * n.activity, 0, Math.PI * 2);
+      ctx.fill();
+
+      // label
+      ctx.fillStyle = n.activity > 0.3 ? n.color : "rgba(220, 230, 255, 0.8)";
+      ctx.font = "600 10px 'Share Tech Mono', monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.fillText(n.label.toUpperCase(), p.x, p.y + n.radius + 14);
+
+      n.activity *= 0.97;
+    }
+  }
+
+  _rgba(hex, a) {
+    if (hex.startsWith("rgb")) return hex;
+    const h = hex.replace("#", "");
+    const n = parseInt(h.length === 3 ? h.split("").map((c) => c + c).join("") : h, 16);
+    const r = (n >> 16) & 255;
+    const g = (n >> 8) & 255;
+    const b = n & 255;
+    return `rgba(${r}, ${g}, ${b}, ${a})`;
+  }
+}
+
+// ============================================================================
+// Servers status chips
+// ============================================================================
 
 async function refreshServers() {
   try {
     const r = await fetch("/api/servers");
-    const data = await r.json();
+    const servers = await r.json();
     const el = $("servers");
     el.innerHTML = "";
-    for (const s of data) {
+    for (const s of servers) {
       const chip = document.createElement("div");
       chip.className = "server-chip" + (s.online ? " online" : "");
       chip.title = s.error || s.models.join("\n");
-      chip.innerHTML = `<span class="dot"></span><strong>${escape(s.label || s.name)}</strong> · ${s.models.length} models`;
+      chip.innerHTML =
+        `<span class="dot"></span><strong>${escape(s.label || s.name)}</strong><span>${s.models.length}</span>`;
       el.appendChild(chip);
     }
-  } catch (e) {
-    console.error("server probe failed", e);
+  } catch (_) {
+    /* offline: leave previous chips */
   }
 }
 
-// ---------- project list ----------------------------------------------------
+// ============================================================================
+// Projects list
+// ============================================================================
 
 async function refreshProjects() {
-  const r = await fetch("/api/projects");
-  state.projects = await r.json();
+  try {
+    const r = await fetch("/api/projects");
+    state.projects = await r.json();
+  } catch (_) {
+    return;
+  }
   const el = $("projects");
   el.innerHTML = "";
   for (const p of state.projects) {
     const li = document.createElement("li");
     li.className = "project-item" + (p.id === state.currentId ? " active" : "");
     li.innerHTML = `<div class="name">${escape(p.name)}</div>
-      <div class="status">${escape(p.status)} · ${new Date(p.created_at).toLocaleString()}</div>
-      <button class="del" title="Supprimer cette mission">×</button>`;
+      <div class="status">${escape(p.status)} · ${new Date(p.created_at).toLocaleDateString()}</div>
+      <button class="del" title="Supprimer">×</button>`;
     li.addEventListener("click", (e) => {
       if (e.target.classList.contains("del")) return;
       openProject(p.id);
     });
     li.querySelector(".del").addEventListener("click", async (e) => {
       e.stopPropagation();
-      if (!confirm(`Supprimer définitivement « ${p.name} » ? Workspace et ZIP seront effacés.`)) return;
+      if (!confirm(`Supprimer « ${p.name} » ?`)) return;
       await deleteProject(p.id);
     });
     el.appendChild(li);
   }
-  const count = document.getElementById("projects-count");
-  if (count) count.textContent = state.projects.length;
+  const c = $("projects-count");
+  if (c) c.textContent = state.projects.length;
 }
 
 async function deleteProject(id) {
   const r = await fetch(`/api/projects/${id}`, { method: "DELETE" });
-  if (!r.ok) {
-    alert("Suppression échouée");
-    return;
-  }
+  if (!r.ok) { alert("Suppression échouée"); return; }
   if (state.currentId === id) {
     state.currentId = null;
     if (state.ws) { try { state.ws.close(); } catch {} state.ws = null; }
     $("project-view").classList.add("hidden");
     $("empty-state").classList.remove("hidden");
+    _ensureIdleGraph();
   }
   await refreshProjects();
 }
 
-// ---------- open + subscribe ------------------------------------------------
+// ============================================================================
+// Open project
+// ============================================================================
 
 async function openProject(id) {
   state.currentId = id;
-  state.tokenBuffers = {};
   state.seenEvents = new Set();
-  state.agentRows = {};
   state.lastLogKey = null;
   state.lastLogCountEl = null;
   state.lastLogCount = 1;
+  state.eventCount = 0;
   $("empty-state").classList.add("hidden");
   $("project-view").classList.remove("hidden");
-  $("agents-live").innerHTML = "";
   $("logs").innerHTML = "";
   $("file-preview").textContent = "";
+  $("current-action").textContent = "initialisation…";
+  $("events-count").textContent = "0";
+  if (state.idleGraph) { state.idleGraph.destroy(); state.idleGraph = null; }
+  _ensureGraph();
+  _populateLegend();
+  if (window.innerWidth <= 860) $("sidebar").classList.remove("open");
   await Promise.all([loadProject(id), subscribe(id)]);
   refreshProjects();
+}
+
+function _ensureGraph() {
+  if (!state.graph) {
+    state.graph = new NeuralGraph($("graph"), { idle: false });
+  }
+}
+
+function _ensureIdleGraph() {
+  if (!state.idleGraph) {
+    state.idleGraph = new NeuralGraph($("idle-graph"), { idle: true });
+  }
+}
+
+function _populateLegend() {
+  const leg = $("graph-legend");
+  leg.innerHTML = "";
+  for (const key of ["planner", "architect", "coder", "reviewer", "tester", "analyst"]) {
+    const el = document.createElement("span");
+    el.className = "leg";
+    el.innerHTML = `<span class="d" style="background:${ROLE_COLORS[key]};box-shadow:0 0 6px ${ROLE_COLORS[key]}"></span>${ROLE_LABEL[key]}`;
+    leg.appendChild(el);
+  }
 }
 
 async function loadProject(id) {
@@ -111,7 +494,6 @@ async function loadProject(id) {
   if (!r.ok) return;
   const p = await r.json();
   $("proj-title").textContent = p.name;
-  $("proj-meta").textContent = `${p.id} · iteration ${p.iteration} · ${p.files.length} fichiers`;
   setStatus(p.status);
   $("btn-zip").href = `/api/projects/${id}/zip`;
   $("btn-zip").classList.toggle("hidden", !p.zip_path);
@@ -121,14 +503,13 @@ async function loadProject(id) {
   for (const t of p.tasks) {
     const li = document.createElement("li");
     li.className = `task t-${t.status}`;
-    const notes = t.review_notes
-      ? `<div class="notes">${escape(t.review_notes)}</div>`
-      : "";
+    const notes = t.review_notes ? `<div class="notes">${escape(t.review_notes)}</div>` : "";
     li.innerHTML = `<div class="title">${escape(t.title)}</div>
       <div class="meta">${t.status} · ${t.attempts} attempt(s) · ${t.file_paths.length} files</div>
       ${notes}`;
     tasks.appendChild(li);
   }
+  $("tasks-count").textContent = p.tasks.length;
 
   const files = $("files");
   files.innerHTML = "";
@@ -146,20 +527,22 @@ async function loadProject(id) {
     };
     files.appendChild(li);
   }
+  $("files-count").textContent = p.files.length;
 }
 
 function setStatus(status) {
   const el = $("proj-status");
   el.className = `status-pill s-${status}`;
   el.textContent = status;
+  if (state.graph) state.graph.transition(status);
 }
 
-// ---------- websocket -------------------------------------------------------
+// ============================================================================
+// WebSocket
+// ============================================================================
 
 function subscribe(id) {
-  if (state.ws) {
-    try { state.ws.close(); } catch (_) {}
-  }
+  if (state.ws) { try { state.ws.close(); } catch {} }
   const proto = location.protocol === "https:" ? "wss" : "ws";
   const ws = new WebSocket(`${proto}://${location.host}/ws/projects/${id}`);
   state.ws = ws;
@@ -170,103 +553,57 @@ function subscribe(id) {
     } catch (_) {}
   };
   ws.onclose = () => {
-    if (state.currentId === id) {
-      setTimeout(() => subscribe(id), 2000);
-    }
+    if (state.currentId === id) setTimeout(() => subscribe(id), 2000);
   };
   return Promise.resolve();
 }
 
 function handleEvent(id, msg) {
   if (msg.kind === "ping") return;
-  // Dedupe replayed events across reconnects using the DB event id.
   if (msg.id) {
     if (state.seenEvents.has(msg.id)) return;
     state.seenEvents.add(msg.id);
   }
 
-  if (msg.kind === "token") {
-    appendToken(msg);
-    return;
+  // Every event drives the graph.
+  if (msg.role && state.graph) {
+    state.graph.pulse(msg.role, msg.kind === "token" ? 0.15 : 0.55);
   }
 
   if (msg.kind === "state") {
-    const newStatus = msg.data?.status;
-    if (newStatus) setStatus(newStatus);
+    const s = msg.data?.status;
+    if (s) setStatus(s);
     loadProject(id);
     refreshProjects();
-    appendLog(msg); // state transitions DO go in the compact event log
+    appendLog(msg);
     return;
   }
 
-  // Flush any running token stream for this role (the agent moved on).
-  flushTokens(msg.role);
+  if (msg.kind === "token") {
+    // update the "current action" line with the live tail
+    const line = $("current-action");
+    const cur = line.dataset.role === msg.role ? line.dataset.buf || "" : "";
+    const buf = (cur + (msg.message || "")).slice(-180);
+    line.dataset.role = msg.role;
+    line.dataset.buf = buf;
+    line.textContent = `${(ROLE_LABEL[msg.role] || msg.role || "").toUpperCase()} · ${buf}`;
+    return;
+  }
 
-  // "agent" events describe what the agent is doing right now → in-place row.
   if (msg.kind === "agent") {
-    updateAgentRow(msg);
+    $("current-action").textContent =
+      `${(ROLE_LABEL[msg.role] || msg.role || "").toUpperCase()} · ${msg.message || ""}`;
+    $("current-action").dataset.buf = "";
     return;
   }
 
-  // error / warning / test / info → compact event log.
   appendLog(msg);
-  if (msg.kind === "test" || msg.kind === "error") {
-    loadProject(id);
-  }
+  if (msg.kind === "test" || msg.kind === "error") loadProject(id);
 }
 
-// ---------- agents-live (one row per agent, replaced in place) -------------
-
-function updateAgentRow(msg) {
-  const role = msg.role || "model";
-  let row = state.agentRows[role];
-  if (!row) {
-    row = document.createElement("div");
-    row.className = `agent-row r-${role}`;
-    row.innerHTML = `
-      <span class="agent-role r-${role}">${escape(ROLE_LABEL[role] || role)}</span>
-      <span class="agent-msg"></span>
-      <span class="agent-spinner"></span>`;
-    state.agentRows[role] = row;
-    $("agents-live").appendChild(row);
-  }
-  row.querySelector(".agent-msg").textContent = msg.message || "";
-  row.classList.add("active");
-  // Clear "active" after 3s of no updates so the spinner stops spinning when idle.
-  clearTimeout(row._idleTimer);
-  row._idleTimer = setTimeout(() => row.classList.remove("active"), 3000);
-}
-
-// ---------- streaming tokens (inline inside the agent row) -----------------
-
-function appendToken(msg) {
-  const role = msg.role || "model";
-  if (!state.tokenBuffers[role]) state.tokenBuffers[role] = "";
-  state.tokenBuffers[role] += msg.message || "";
-
-  let row = state.agentRows[role];
-  if (!row) {
-    // Synthesize an empty agent row so the stream has somewhere to live.
-    updateAgentRow({ role, message: "…" });
-    row = state.agentRows[role];
-  }
-  const tail = state.tokenBuffers[role].slice(-240).replace(/\s+/g, " ");
-  row.querySelector(".agent-msg").textContent = tail;
-  row.classList.add("active");
-  clearTimeout(row._idleTimer);
-  row._idleTimer = setTimeout(() => row.classList.remove("active"), 3000);
-}
-
-function flushTokens(role) {
-  if (!role) {
-    for (const r of Object.keys(state.tokenBuffers)) flushTokens(r);
-    return;
-  }
-  delete state.tokenBuffers[role];
-  // Leave the agent row in place — it already shows the last message.
-}
-
-// ---------- compact event log (state / error / warning / test) ------------
+// ============================================================================
+// Event log (events tab)
+// ============================================================================
 
 function appendLog(msg) {
   const logs = $("logs");
@@ -325,12 +662,15 @@ function appendLog(msg) {
   state.lastLogKey = key;
   state.lastLogCount = 1;
   state.lastLogCountEl = div.querySelector(".log-count");
-  // Cap to 200 lines so the log never takes "un mètre de page".
+  state.eventCount += 1;
+  $("events-count").textContent = state.eventCount;
   while (logs.children.length > 200) logs.removeChild(logs.firstChild);
   logs.scrollTop = logs.scrollHeight;
 }
 
-// ---------- create project form --------------------------------------------
+// ============================================================================
+// UI wiring
+// ============================================================================
 
 $("new-project").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -349,7 +689,7 @@ $("new-project").addEventListener("submit", async (e) => {
     await refreshProjects();
     openProject(p.id);
   } else {
-    alert("Erreur création projet: " + r.status);
+    alert("Creation failed");
   }
 });
 
@@ -373,16 +713,34 @@ $("btn-delete").addEventListener("click", async () => {
   if (!state.currentId) return;
   const current = state.projects.find((p) => p.id === state.currentId);
   const label = current ? current.name : state.currentId;
-  if (!confirm(`Supprimer définitivement « ${label} » ? Workspace et ZIP seront effacés.`)) return;
+  if (!confirm(`Supprimer « ${label} » ?`)) return;
   await deleteProject(state.currentId);
+});
+
+// Drawer tabs
+for (const tab of document.querySelectorAll(".drawer-tab")) {
+  tab.addEventListener("click", () => {
+    for (const t of document.querySelectorAll(".drawer-tab")) t.classList.remove("active");
+    for (const p of document.querySelectorAll(".pane")) p.classList.remove("active");
+    tab.classList.add("active");
+    $("pane-" + tab.dataset.tab).classList.add("active");
+  });
+}
+
+// Mobile sidebar toggle
+$("btn-menu").addEventListener("click", () => {
+  $("sidebar").classList.toggle("open");
 });
 
 function escape(s) {
   return String(s).replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]);
 }
 
-// ---------- boot -----------------------------------------------------------
+// ============================================================================
+// Boot
+// ============================================================================
 
+_ensureIdleGraph();
 refreshServers();
 refreshProjects();
 setInterval(refreshServers, 15000);
