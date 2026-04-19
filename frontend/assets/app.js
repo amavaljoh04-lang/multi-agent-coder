@@ -150,14 +150,31 @@ class NeuralGraph {
     }
   }
 
-  /** Register an activity on a role: glow + spawn a few particles from its predecessors. */
+  /**
+   * Register an activity on a role: glow the node AND emit particles outward
+   * along every outgoing edge so you visually see the work "radiate" from it.
+   */
   pulse(roleKey, intensity = 1) {
     const node = this._node(roleKey);
     if (!node) return;
     node.activity = Math.min(1, node.activity + intensity);
-    for (const e of this.edges) {
-      if (e.b === roleKey) {
-        e.flow = Math.min(1, e.flow + 0.8 * intensity);
+    node.emitAccum = (node.emitAccum || 0) + intensity;
+
+    // outgoing edges light up (brighter than incoming) + particles shoot outward
+    const outgoing = this.edges.filter((e) => e.a === roleKey);
+    const incoming = this.edges.filter((e) => e.b === roleKey);
+    for (const e of outgoing) {
+      e.flow = Math.min(1, e.flow + 0.9 * intensity);
+    }
+    for (const e of incoming) {
+      e.flow = Math.min(1, e.flow + 0.25 * intensity);
+    }
+
+    // Spawn particles radiating outward. Number scales with intensity.
+    const n = Math.max(1, Math.min(4, Math.ceil(intensity * 3)));
+    for (let i = 0; i < n; i++) {
+      for (const e of outgoing) {
+        setTimeout(() => this.emit(e.a, e.b, node.color), i * 55);
       }
     }
   }
@@ -177,7 +194,7 @@ class NeuralGraph {
     });
   }
 
-  /** Record a state transition: animate the expected pipeline edge. */
+  /** Record a state transition: burst of particles along the pipeline edge. */
   transition(status) {
     const map = {
       planning:     [[null, "planner"]],
@@ -191,10 +208,11 @@ class NeuralGraph {
     const pairs = map[status] || [];
     for (const [a, b] of pairs) {
       if (a) {
-        for (let i = 0; i < 5; i++) {
-          setTimeout(() => this.emit(a, b), i * 80);
+        const from = this._node(a);
+        // big burst of particles from predecessor to successor
+        for (let i = 0; i < 8; i++) {
+          setTimeout(() => this.emit(a, b, from ? from.color : null), i * 70);
         }
-        this.pulse(a, 0.3);
       }
       this.pulse(b, 0.9);
     }
@@ -497,6 +515,11 @@ async function loadProject(id) {
   setStatus(p.status);
   $("btn-zip").href = `/api/projects/${id}/zip`;
   $("btn-zip").classList.toggle("hidden", !p.zip_path);
+  const banner = $("zip-banner");
+  if (banner) {
+    banner.href = `/api/projects/${id}/zip`;
+    banner.classList.toggle("hidden", !p.zip_path);
+  }
 
   const tasks = $("tasks");
   tasks.innerHTML = "";
@@ -565,9 +588,10 @@ function handleEvent(id, msg) {
     state.seenEvents.add(msg.id);
   }
 
-  // Every event drives the graph.
+  // Every event drives the graph: the working agent emits particles outward.
   if (msg.role && state.graph) {
-    state.graph.pulse(msg.role, msg.kind === "token" ? 0.15 : 0.55);
+    const intensity = msg.kind === "token" ? 0.25 : msg.kind === "agent" ? 0.75 : 0.55;
+    state.graph.pulse(msg.role, intensity);
   }
 
   if (msg.kind === "state") {
