@@ -19,12 +19,15 @@ servers:
     label: "RTX 3070"
     concurrency: 2
 
-# Only two coding-capable models are used in the whole pipeline:
-#   * deepseek-coder:33b  — primary for code + fix work
-#   * qwen2.5-coder:14b   — fallback for code + fix work
+# Coding-capable models used in the whole pipeline:
+#   * qwen2.5-coder:32b   — primary for code + fix work (state-of-the-art
+#                           open-source coder as of late 2025, ~20 GB Q4,
+#                           small CPU offload on a 12 GB GPU, very usable)
+#   * deepseek-coder:33b  — secondary fallback for code + fix
+#   * qwen2.5-coder:14b   — lightweight fallback (tight VRAM situations)
 #   * deepseek-r1:14b     — reasoning (planner / architect / reviewer / analyst)
 # If none of these are reachable, the pipeline fails fast rather than
-# falling back to a weak model.
+# silently demoting to a weak model that produces broken output.
 roles:
   # Splits the project into atomic tasks, produces the plan.
   planner:
@@ -46,8 +49,9 @@ roles:
 
   # Main code writer.
   coder:
-    primary: { server: gpu5070, model: "deepseek-coder:33b" }
+    primary: { server: gpu5070, model: "qwen2.5-coder:32b" }
     fallbacks:
+      - { server: gpu5070, model: "deepseek-coder:33b" }
       - { server: gpu5070, model: "qwen2.5-coder:14b" }
       - { server: gpu4060, model: "qwen2.5-coder:14b" }
     temperature: 0.15
@@ -72,12 +76,13 @@ roles:
     num_ctx: 12288
 
   # Dedicated fixer: applies the smallest possible patch given an analyst
-  # report. Separated from `coder` so we can use temperature 0 and a
-  # stricter prompt — the coder writes new code, the fixer edits existing
-  # code without rewriting it.
+  # report or an in-loop static-check error. Separated from `coder` so we
+  # can use temperature 0 and a stricter prompt — the coder writes new
+  # code, the fixer edits existing code without rewriting it.
   fixer:
-    primary: { server: gpu5070, model: "deepseek-coder:33b" }
+    primary: { server: gpu5070, model: "qwen2.5-coder:32b" }
     fallbacks:
+      - { server: gpu5070, model: "deepseek-coder:33b" }
       - { server: gpu5070, model: "qwen2.5-coder:14b" }
       - { server: gpu4060, model: "qwen2.5-coder:14b" }
     temperature: 0.0

@@ -326,14 +326,57 @@ class Orchestrator:
         await self._write_files(project_id, workspace, blocks)
         await self._set_task_status(task.id, TaskStatus.REVIEWING)
 
-        # Pre-review lint: catch syntax errors / undefined names / dead
-        # imports via ruff BEFORE paying for a 30s LLM review round-trip.
-        # When lint fails, bounce the task back to the coder with the
-        # issues as review_notes — no LLM review for this attempt.
-        lint_issues, bad_paths = await self._lint_python_files(
+        # In-loop static check: compile() + ruff on the files we just
+        # wrote. If anything fails we give the FIXER one immediate pass
+        # (temperature 0, narrow prompt) to patch the issues, then
+        # re-check. This avoids paying for a 30s LLM review round-trip
+        # just to be told "you have a NameError on line 12".
+        static_issues, bad_paths = await self._static_check_python_files(
             workspace, list(blocks.keys())
         )
-        if lint_issues:
+        if static_issues:
+            await self.emit(
+                project_id, "warning", "fixer",
+                f"[{task.title}] static check failed "
+                f"({len(static_issues)} issue(s)) — running in-loop fix",
+                data={"issues": static_issues, "files": sorted(bad_paths)},
+            )
+            try:
+                fix_existing = await self._collect_files(project_id)
+                # Restrict to siblings of the failing files to keep the
+                # prompt tight.
+                relevant_paths = set(blocks.keys()) | bad_paths
+                fix_existing = {
+                    p: c for p, c in fix_existing.items()
+                    if p in relevant_paths
+                }
+                fixed = await agents.run_static_fix(
+                    self.router,
+                    plan=plan,
+                    task=task_dict,
+                    issues=static_issues,
+                    existing_files=fix_existing,
+                    stream_callback=self._coder_streamer(project_id, "fixer"),
+                )
+            except Exception as exc:
+                fixed = {}
+                await self.emit(
+                    project_id, "warning", "fixer",
+                    f"[{task.title}] in-loop fix skipped: {exc}",
+                )
+
+            if fixed:
+                await self._write_files(project_id, workspace, fixed)
+                # Re-check on the union of originally-written files and
+                # files the fixer actually touched.
+                recheck_paths = list(set(blocks.keys()) | set(fixed.keys()))
+                static_issues, bad_paths = (
+                    await self._static_check_python_files(
+                        workspace, recheck_paths
+                    )
+                )
+
+        if static_issues:
             for _rpath in blocks:
                 if _rpath in bad_paths:
                     await self.emit(
@@ -342,25 +385,27 @@ class Orchestrator:
                     )
                 else:
                     # File was fine — don't mark it rejected just because a
-                    # sibling in the same task failed lint.
+                    # sibling in the same task failed the check.
                     await self.emit(
                         project_id, "file_review_end", "reviewer", _rpath,
                         data={"path": _rpath, "approved": True},
                     )
-            notes = "Lint errors (ruff) must be fixed:\n" + "\n".join(
-                f"- {i}" for i in lint_issues[:20]
+            notes = (
+                "Static checks still fail after in-loop fix:\n"
+                + "\n".join(f"- {i}" for i in static_issues[:20])
             )
             await self._bump_attempts(task.id, review_notes=notes)
             await self.emit(
                 project_id, "warning", "reviewer",
-                f"[{task.title}] lint check rejected ({len(lint_issues)} issue(s))",
-                data={"issues": lint_issues},
+                f"[{task.title}] static check rejected "
+                f"({len(static_issues)} issue(s))",
+                data={"issues": static_issues},
             )
             if task.attempts + 1 >= max_reviews:
                 await self._set_task_status(task.id, TaskStatus.DONE)
                 await self.emit(
                     project_id, "warning", "reviewer",
-                    f"[{task.title}] force-approved after lint loop",
+                    f"[{task.title}] force-approved after static-check loop",
                 )
             return
 
@@ -841,72 +886,96 @@ class Orchestrator:
                 return role
         return "coder"
 
-    async def _lint_python_files(
+    async def _static_check_python_files(
         self, workspace: Path, paths: list[str]
     ) -> tuple[list[str], set[str]]:
-        """Run ruff on the given Python files and return (issues, bad_paths).
+        """Run local static checks on Python files and return (issues, bad_paths).
 
-        Scope is deliberately narrow: only rules that mean "the code is
-        broken at runtime" get flagged.
+        Two passes, in order:
 
-        * E9 — real syntax errors (parser failed).
-        * F63/F7/F82 — pyflakes-level parse errors.
-        * F821 — undefined name used at runtime (NameError).
+        1. ``compile()`` — Python's own parser. Catches SyntaxError and
+           IndentationError even when ruff isn't installed. This is the
+           single most valuable check: it's what matters for the code to
+           be importable.
+        2. ``ruff check`` with a narrow selector (E9/F63/F7/F82/F821).
+           Runs only on files that passed the compile step, so we don't
+           drown a syntax error in extra noise.
 
-        We explicitly do NOT flag:
-
-        * F401 "unused import" — legitimate in ``__init__.py`` re-exports
-          and in conditional imports.
-        * F811 "redefinition" — not a runtime bug.
-        * F841 "unused local" — stylistic.
-
-        Returns empty output when ruff is missing or no Python files are
-        in the task, so the pipeline degrades gracefully.
+        ``ruff`` is not strictly required — if it's missing we still
+        report compile errors.
         """
         py_files = [p for p in paths if p.endswith(".py")]
         if not py_files:
             return [], set()
-        rel_by_abs = {
-            str((workspace / p).resolve()): p
-            for p in py_files
-            if (workspace / p).exists()
-        }
-        if not rel_by_abs:
-            return [], set()
-        selected = "E9,F63,F7,F82,F821"
-        cmd = [
-            "ruff", "check",
-            "--select", selected,
-            "--output-format", "concise",
-            "--no-fix",
-            *rel_by_abs.keys(),
-        ]
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=30)
-        except (FileNotFoundError, TimeoutError):
-            return [], set()
-        if proc.returncode == 0:
-            return [], set()
+
         issues: list[str] = []
         bad: set[str] = set()
-        for line in stdout.decode(errors="replace").splitlines():
-            line = line.strip()
-            if not line or line.startswith("Found ") or line.startswith("[*]"):
+
+        # Pass 1 — compile() on every file.
+        compile_ok: list[str] = []
+        for rel in py_files:
+            abs_path = workspace / rel
+            if not abs_path.exists():
                 continue
-            # Map absolute path prefix back to the relative path the
-            # orchestrator knows, and remember which files failed.
-            for abs_path, rel_path in rel_by_abs.items():
-                if line.startswith(abs_path):
-                    bad.add(rel_path)
-                    line = rel_path + line[len(abs_path):]
-                    break
-            issues.append(line)
+            try:
+                source = abs_path.read_text(encoding="utf-8", errors="replace")
+            except OSError as exc:
+                issues.append(f"{rel}:1:1: IOError reading file: {exc}")
+                bad.add(rel)
+                continue
+            try:
+                compile(source, rel, "exec")
+                compile_ok.append(rel)
+            except SyntaxError as exc:
+                line = exc.lineno or 1
+                col = exc.offset or 1
+                msg = exc.msg or "syntax error"
+                issues.append(f"{rel}:{line}:{col}: SyntaxError: {msg}")
+                bad.add(rel)
+
+        # Pass 2 — ruff on files that compile cleanly.
+        if compile_ok:
+            rel_by_abs = {
+                str((workspace / p).resolve()): p for p in compile_ok
+            }
+            selected = "E9,F63,F7,F82,F821"
+            cmd = [
+                "ruff", "check",
+                "--select", selected,
+                "--output-format", "concise",
+                "--no-fix",
+                *rel_by_abs.keys(),
+            ]
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                stdout, _ = await asyncio.wait_for(
+                    proc.communicate(), timeout=30
+                )
+            except (FileNotFoundError, TimeoutError):
+                return issues, bad
+            if proc.returncode != 0:
+                for line in stdout.decode(errors="replace").splitlines():
+                    line = line.strip()
+                    if (
+                        not line
+                        or line.startswith("Found ")
+                        or line.startswith("[*]")
+                    ):
+                        continue
+                    for abs_path, rel_path in rel_by_abs.items():
+                        if line.startswith(abs_path):
+                            bad.add(rel_path)
+                            line = rel_path + line[len(abs_path):]
+                            break
+                    issues.append(line)
         return issues, bad
+
+    # Kept as an alias so any downstream caller doesn't break.
+    _lint_python_files = _static_check_python_files
 
     async def _next_pending_task(self, project_id: str) -> Task | None:
         async with SessionLocal() as s:

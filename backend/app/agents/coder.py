@@ -155,3 +155,74 @@ async def run_fix(
     if not blocks:
         raise ValueError("Fixer did not produce any fenced file blocks")
     return blocks
+
+
+STATIC_FIX_PROMPT = """\
+You are the FIXER. You are editing code that FAILED local static checks
+(syntax error, missing import, undefined name, etc.) BEFORE anything was
+run. Your job is the SMALLEST possible patch that makes the checks pass.
+
+Project context (JSON):
+---
+{plan}
+---
+
+Task currently being worked on:
+Title: {title}
+Description:
+{description}
+
+The following static checks failed on the files of this task:
+{issues}
+
+Current content of those files (and their siblings):
+{existing_files_block}
+
+Output format — one fenced block per file you modify:
+
+```path=relative/path.ext
+<full updated file content>
+```
+
+ABSOLUTE RULES:
+1. Fix ONLY the reported issues. Do not refactor, rename, or rewrite.
+2. Emit ONLY the files you actually change. Leave the rest untouched.
+3. Copy each edited file verbatim and change only the lines needed to
+   clear the errors. Preserve imports order, docstrings, comments.
+4. Missing module/name: prefer adding the correct import. If the
+   symbol truly doesn't exist, define it minimally.
+5. Unused import flagged in `__init__.py`: ignore — package re-exports
+   are legitimate. (If you see such an issue, just emit nothing for
+   that file.)
+6. No prose outside fenced blocks. Full files only, not diffs.
+"""
+
+
+async def run_static_fix(
+    router: OllamaRouter,
+    *,
+    plan: dict[str, Any],
+    task: dict[str, Any],
+    issues: list[str],
+    existing_files: dict[str, str],
+    stream_callback: Any | None = None,
+) -> dict[str, str]:
+    """Fixer pass triggered by local static checks (compile + ruff).
+
+    Called before the LLM reviewer, so we don't pay for a 30s review
+    round-trip when the fix is a 1-line import or typo.
+    """
+    prompt = STATIC_FIX_PROMPT.format(
+        plan=json.dumps(plan, indent=2, ensure_ascii=False),
+        title=task.get("title", ""),
+        description=task.get("description", ""),
+        issues="\n".join(f"- {i}" for i in issues[:40]) or "(none)",
+        existing_files_block=_fmt_existing(existing_files, limit_chars=60000),
+    )
+    text = await router.generate(
+        "fixer", prompt, system=CODE_SYSTEM, stream_callback=stream_callback
+    )
+    blocks = extract_code_blocks(text)
+    if not blocks:
+        raise ValueError("Fixer did not produce any fenced file blocks")
+    return blocks
