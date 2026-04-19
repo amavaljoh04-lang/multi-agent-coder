@@ -339,9 +339,21 @@ class Orchestrator:
         self, project_id: str, status: ProjectStatus, *, last_error: str = ""
     ) -> None:
         await self._update(project_id, status=status, last_error=last_error)
+        async with SessionLocal() as s:
+            ev = Event(
+                project_id=project_id,
+                kind="state",
+                role="",
+                message=f"status={status.value}",
+                data={"status": status.value, "last_error": last_error},
+            )
+            s.add(ev)
+            await s.commit()
+            event_id = ev.id
         await bus.publish(
             project_id,
             {
+                "id": event_id,
                 "kind": "state",
                 "role": "",
                 "message": f"status={status.value}",
@@ -356,9 +368,16 @@ class Orchestrator:
             ev = Event(project_id=project_id, kind=kind, role=role, message=message, data=data)
             s.add(ev)
             await s.commit()
+            event_id = ev.id
         await bus.publish(
             project_id,
-            {"kind": kind, "role": role, "message": message, "data": data or {}},
+            {
+                "id": event_id,
+                "kind": kind,
+                "role": role,
+                "message": message,
+                "data": data or {},
+            },
         )
 
     def _streamer(self, project_id: str, role: str):

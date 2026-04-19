@@ -237,6 +237,7 @@ async def ws_project(websocket: WebSocket, project_id: str) -> None:
         for ev in reversed(rows):
             await websocket.send_json(
                 {
+                    "id": ev.id,
                     "kind": ev.kind,
                     "role": ev.role,
                     "message": ev.message,

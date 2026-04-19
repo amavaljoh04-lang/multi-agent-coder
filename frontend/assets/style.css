@@ -235,6 +235,78 @@ a { color: var(--accent-2); }
 .task .meta { font-size: 10px; color: var(--text-dim); text-transform: uppercase; letter-spacing: 1px; margin-top: 2px; }
 .task .notes { margin-top: 6px; padding: 6px; background: rgba(251, 191, 36, 0.08); border-radius: 4px; white-space: pre-wrap; font-size: 11px; }
 
+.sub-title {
+  font-size: 10px;
+  letter-spacing: 2px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  margin: 10px 0 4px;
+}
+
+.agents-live {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  flex: 0 0 auto;
+  max-height: 38%;
+  overflow-y: auto;
+}
+.agent-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: #0b1224;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font-size: 12px;
+  opacity: 0.55;
+  transition: opacity 0.2s ease, box-shadow 0.2s ease;
+}
+.agent-row.active {
+  opacity: 1;
+  box-shadow: 0 0 0 1px rgba(94, 234, 212, 0.25), 0 0 18px rgba(94, 234, 212, 0.12);
+}
+.agent-role {
+  display: inline-block;
+  min-width: 70px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+.agent-role.r-planner { color: var(--violet); }
+.agent-role.r-architect { color: var(--accent-2); }
+.agent-role.r-coder { color: var(--accent); }
+.agent-role.r-reviewer { color: var(--warn); }
+.agent-role.r-tester { color: var(--ok); }
+.agent-role.r-analyst { color: var(--accent-2); }
+.agent-msg {
+  flex: 1;
+  min-width: 0;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-family: "JetBrains Mono", monospace;
+}
+.agent-spinner {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--text-dim);
+  flex: 0 0 auto;
+}
+.agent-row.active .agent-spinner {
+  background: var(--accent);
+  box-shadow: 0 0 8px var(--accent);
+  animation: pulse 1.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { transform: scale(1); opacity: 0.6; }
+  50% { transform: scale(1.4); opacity: 1; }
+}
+
 .logs {
   flex: 1;
   overflow-y: auto;
@@ -266,6 +338,8 @@ a { color: var(--accent-2); }
 .log-line.k-test { color: var(--accent-2); }
 .log-line.k-token { color: var(--text-dim); }
 .log-time { color: #555; margin-right: 6px; font-size: 10px; }
+.log-msg { white-space: pre-wrap; }
+.log-count { color: var(--accent); margin-left: 6px; font-size: 10px; font-weight: 700; }
 
 .files { list-style: none; padding: 0; margin: 0 0 8px; max-height: 35%; overflow-y: auto; }
 .files li {
