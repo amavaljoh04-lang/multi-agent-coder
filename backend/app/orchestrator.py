@@ -306,12 +306,14 @@ class Orchestrator:
                 "description": task.description,
                 "file_paths": task.file_paths,
             }
+            coder_role = self._coder_role_for_files(task.file_paths)
             blocks = await agents.run_coder(
                 self.router,
                 plan=plan,
                 task=task_dict,
                 existing_files=existing,
                 review_notes=review_notes,
+                role=coder_role,
                 stream_callback=self._coder_streamer(project_id, "coder"),
             )
         except Exception as exc:
@@ -797,6 +799,37 @@ class Orchestrator:
                         )
                     )
             await s.commit()
+
+    def _coder_role_for_files(self, paths: list[str]) -> str:
+        """Pick the most specialised coder role available for ``paths``.
+
+        Looks at file extensions and returns a role like ``coder_py`` or
+        ``coder_web``. Falls back to the generic ``coder`` role when the
+        specialised role isn't configured, or when the task mixes
+        languages.
+        """
+        if not paths:
+            return "coder"
+        groups = {
+            "coder_py": {".py", ".pyi"},
+            "coder_web": {".js", ".jsx", ".ts", ".tsx", ".html", ".css", ".vue", ".svelte"},
+            "coder_rust": {".rs"},
+            "coder_go": {".go"},
+        }
+        matched: set[str] = set()
+        for p in paths:
+            ext = "." + p.rsplit(".", 1)[-1].lower() if "." in p else ""
+            for role, exts in groups.items():
+                if ext in exts:
+                    matched.add(role)
+                    break
+        # Exactly one recognised language → use its specialised role
+        # (if the role is actually configured).
+        if len(matched) == 1:
+            role = next(iter(matched))
+            if role in self.router.cfg.roles:
+                return role
+        return "coder"
 
     async def _lint_python_files(
         self, workspace: Path, paths: list[str]

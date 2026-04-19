@@ -57,6 +57,38 @@ roles:
     temperature: 0.15
     num_ctx: 12288
 
+  # Language-specialised coders. The orchestrator picks one of these
+  # based on the file extensions in the task (fallback to `coder` when
+  # the language is mixed or unknown). Having a dedicated model per
+  # language means we stop trying to coax a Python model into writing
+  # idiomatic Rust, and vice versa.
+  coder_py:
+    primary: { server: gpu5070, model: "deepseek-coder:33b" }
+    fallbacks:
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
+    temperature: 0.1
+    num_ctx: 16384
+  coder_web:
+    primary: { server: gpu5070, model: "qwen2.5-coder:14b" }
+    fallbacks:
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
+      - { server: gpu5070, model: "deepseek-coder:33b" }
+    temperature: 0.15
+    num_ctx: 16384
+  coder_rust:
+    primary: { server: gpu5070, model: "deepseek-coder:33b" }
+    fallbacks:
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+    temperature: 0.1
+    num_ctx: 16384
+  coder_go:
+    primary: { server: gpu5070, model: "deepseek-coder:33b" }
+    fallbacks:
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+    temperature: 0.1
+    num_ctx: 16384
+
   # Reviews code written by the coder (different base model for diversity).
   reviewer:
     primary: { server: gpu5070, model: "deepseek-r1:14b" }
@@ -112,3 +144,9 @@ orchestrator:
   sandbox_image: "python:3.12-slim"
   # Hard timeout for a single test run inside the sandbox (seconds).
   sandbox_timeout: 600
+  # How many coder tasks may run concurrently (each on a different GPU).
+  # With 3 Ollama servers, 2-3 is the sweet spot.
+  parallel_coders: 2
+  # Absolute wall-clock budget per project, in seconds. -1 = unlimited.
+  # Typical values: 3600 = 1h, 86400 = 1 day, 604800 = 1 week.
+  max_wall_seconds: -1
