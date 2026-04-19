@@ -1,0 +1,99 @@
+# Multi-Agent Coder — configuration
+#
+# This file wires the 3 Ollama servers to the roles used by the orchestrator.
+# Each role has a primary pick and a list of fallbacks that will be tried in
+# order if the primary server is down, overloaded, or returns errors.
+#
+# Server URLs are plain HTTP Ollama endpoints (the default port is 11434).
+
+servers:
+  gpu5070:
+    url: "http://192.168.0.224:11434"
+    label: "RTX 5070 (12 Go)"
+    concurrency: 2
+  gpu4060:
+    url: "http://192.168.0.203:11434"
+    label: "RTX 4060"
+    concurrency: 2
+  gpu3070:
+    url: "http://192.168.0.249:11434"
+    label: "RTX 3070"
+    concurrency: 2
+
+roles:
+  # Splits the project into atomic tasks, produces the plan.
+  planner:
+    primary: { server: gpu5070, model: "deepseek-r1:14b" }
+    fallbacks:
+      - { server: gpu5070, model: "glm-5.1:cloud" }
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+    temperature: 0.2
+    num_ctx: 16384
+
+  # Produces the high level architecture (file tree, specs, interfaces).
+  architect:
+    primary: { server: gpu5070, model: "kimi-k2.5:cloud" }
+    fallbacks:
+      - { server: gpu5070, model: "deepseek-r1:14b" }
+      - { server: gpu5070, model: "glm-5.1:cloud" }
+    temperature: 0.3
+    num_ctx: 32768
+
+  # Main code writer.
+  coder:
+    primary: { server: gpu5070, model: "qwen2.5-coder:14b" }
+    fallbacks:
+      - { server: gpu5070, model: "deepseek-coder:33b" }
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
+    temperature: 0.15
+    num_ctx: 16384
+
+  # Parallel coder for independent files, runs on a second server.
+  coder_parallel:
+    primary: { server: gpu4060, model: "qwen2.5-coder:7b" }
+    fallbacks:
+      - { server: gpu3070, model: "deepseek-coder:6.7b" }
+      - { server: gpu5070, model: "qwen2.5-coder:7b" }
+    temperature: 0.15
+    num_ctx: 12288
+
+  # Reviews code written by the coder (different base model for diversity).
+  reviewer:
+    primary: { server: gpu5070, model: "deepseek-r1:14b" }
+    fallbacks:
+      - { server: gpu4060, model: "qwen2.5:7b-instruct-q4_K_M" }
+      - { server: gpu5070, model: "deepseek-coder:33b" }
+    temperature: 0.1
+    num_ctx: 16384
+
+  # Analyses test failures / stack traces and proposes a fix plan.
+  tester_analyst:
+    primary: { server: gpu3070, model: "gemma4:latest" }
+    fallbacks:
+      - { server: gpu4060, model: "mistral:latest" }
+      - { server: gpu3070, model: "qwen2.5-coder:1.5b" }
+    temperature: 0.1
+    num_ctx: 8192
+
+  # Cheap dispatcher / classification tasks.
+  dispatcher:
+    primary: { server: gpu3070, model: "qwen2.5-coder:1.5b" }
+    fallbacks:
+      - { server: gpu3070, model: "gemma4:latest" }
+    temperature: 0.0
+    num_ctx: 4096
+
+orchestrator:
+  # Max number of test/fix iterations per project (-1 = infinite, runs for
+  # weeks if needed — the user explicitly asked for this).
+  max_iterations: -1
+  # Max retries when a file fails review before escalating back to the planner.
+  max_review_retries: 5
+  # Seconds between heartbeats (used to detect stalled background jobs).
+  heartbeat_interval: 30
+  # Sandbox type: "docker" (isolated) or "local" (no isolation, dangerous).
+  sandbox: "docker"
+  # Docker image used for the sandbox.
+  sandbox_image: "python:3.12-slim"
+  # Hard timeout for a single test run inside the sandbox (seconds).
+  sandbox_timeout: 600

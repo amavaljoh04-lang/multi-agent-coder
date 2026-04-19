@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Multi-Agent Coder</title>
+    <link rel="stylesheet" href="/assets/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="logo">⚙︎</span>
+        <div>
+          <div class="brand-title">MULTI-AGENT CODER</div>
+          <div class="brand-sub">Ollama swarm · 5070 / 4060 / 3070</div>
+        </div>
+      </div>
+      <div id="servers" class="servers"></div>
+    </header>
+
+    <main class="shell">
+      <aside class="sidebar">
+        <div class="panel">
+          <div class="panel-title">Nouveau projet</div>
+          <form id="new-project" class="form">
+            <label>Nom du projet</label>
+            <input id="proj-name" type="text" placeholder="api-todo-fastapi" required />
+            <label>Description / cahier des charges</label>
+            <textarea id="proj-prompt" rows="8" placeholder="Crée une API FastAPI avec auth JWT, endpoints CRUD pour des todos, tests pytest, et un Dockerfile." required></textarea>
+            <button type="submit" class="btn primary">Lancer le swarm</button>
+          </form>
+        </div>
+
+        <div class="panel">
+          <div class="panel-title">Projets</div>
+          <ul id="projects" class="projects"></ul>
+        </div>
+      </aside>
+
+      <section class="workbench">
+        <div id="empty-state" class="empty-state">
+          <h1>Bienvenue.</h1>
+          <p>Décrivez un projet à gauche, le swarm de 3 GPU Ollama s'en occupe : plan → code → review → tests en boucle jusqu'au ZIP final.</p>
+          <ul class="pipeline">
+            <li><span class="dot dot-plan"></span>Planner <em>(deepseek-r1:14b · 5070)</em></li>
+            <li><span class="dot dot-arch"></span>Architect <em>(kimi-k2.5:cloud · 5070)</em></li>
+            <li><span class="dot dot-code"></span>Coder <em>(qwen2.5-coder:14b · 5070)</em></li>
+            <li><span class="dot dot-review"></span>Reviewer <em>(deepseek-r1:14b · 5070)</em></li>
+            <li><span class="dot dot-test"></span>Tester <em>(gemma4 · 3070)</em></li>
+          </ul>
+        </div>
+
+        <div id="project-view" class="project-view hidden">
+          <header class="project-header">
+            <div>
+              <h2 id="proj-title">—</h2>
+              <div class="muted" id="proj-meta">—</div>
+            </div>
+            <div class="actions">
+              <span id="proj-status" class="status-pill">—</span>
+              <button id="btn-pause" class="btn">Pause</button>
+              <button id="btn-resume" class="btn">Reprendre</button>
+              <a id="btn-zip" class="btn success" href="#" download>Télécharger ZIP</a>
+            </div>
+          </header>
+
+          <div class="grid">
+            <div class="panel col-tasks">
+              <div class="panel-title">Tâches</div>
+              <ul id="tasks" class="tasks"></ul>
+            </div>
+
+            <div class="panel col-logs">
+              <div class="panel-title">Live stream</div>
+              <div id="logs" class="logs"></div>
+            </div>
+
+            <div class="panel col-files">
+              <div class="panel-title">Fichiers générés</div>
+              <ul id="files" class="files"></ul>
+              <pre id="file-preview" class="file-preview"></pre>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/assets/app.js"></script>
+  </body>
+</html>

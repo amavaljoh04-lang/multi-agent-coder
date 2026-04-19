@@ -1,0 +1,22 @@
+services:
+  multi-agent-coder:
+    build: .
+    image: multi-agent-coder:latest
+    container_name: multi-agent-coder
+    restart: unless-stopped
+    # Host network so we can reach the 3 Ollama servers on the LAN
+    # (192.168.0.224 / 203 / 249) AND run Docker-in-Docker for the sandbox.
+    network_mode: host
+    environment:
+      - MAC_HOST=0.0.0.0
+      - MAC_PORT=5555
+      - MAC_CONFIG_PATH=/app/config.yaml
+    volumes:
+      - ./data:/app/data
+      - ./workspaces:/app/workspaces
+      - ./zips:/app/zips
+      - ./config.yaml:/app/config.yaml:ro
+      # Expose the host Docker socket so the sandbox can run isolated
+      # containers to test generated code. If you don't want that, set
+      # orchestrator.sandbox to "local" in config.yaml and remove this mount.
+      - /var/run/docker.sock:/var/run/docker.sock
