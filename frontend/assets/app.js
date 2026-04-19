@@ -31,7 +31,12 @@ const state = {
   eventCount: 0,
   graph: null,
   idleGraph: null,
+  // per-file streaming visualisation
+  stream: new Map(), // path -> { el, preEl, headerEl, statusEl, content }
+  streamOrder: [],
 };
+
+const FILE_CAP = 8000; // max characters kept in the live pre-element per file
 
 // ============================================================================
 // Neural graph engine
@@ -476,6 +481,7 @@ async function openProject(id) {
   $("file-preview").textContent = "";
   $("current-action").textContent = "initialisation…";
   $("events-count").textContent = "0";
+  _resetStream();
   if (state.idleGraph) { state.idleGraph.destroy(); state.idleGraph = null; }
   _ensureGraph();
   _populateLegend();
@@ -581,6 +587,102 @@ function subscribe(id) {
   return Promise.resolve();
 }
 
+// ============================================================================
+// Live file-streaming panel
+// ============================================================================
+
+function _streamListEl() { return $("stream"); }
+function _streamEmptyEl() { return $("stream-empty"); }
+
+function _ensureFileEntry(path, role) {
+  let entry = state.stream.get(path);
+  if (entry) return entry;
+
+  const list = _streamListEl();
+  const emptyEl = _streamEmptyEl();
+  if (emptyEl) emptyEl.classList.add("hidden");
+
+  const li = document.createElement("li");
+  li.className = "stream-file writing";
+  li.innerHTML =
+    `<header class="stream-head">
+       <span class="stream-status" title="en écriture">◉</span>
+       <span class="stream-path">${escape(path)}</span>
+       <span class="stream-agent r-${escape(role || "coder")}">${escape((role || "coder").toUpperCase())}</span>
+     </header>
+     <pre class="stream-body"></pre>`;
+  list.appendChild(li);
+
+  entry = {
+    el: li,
+    preEl: li.querySelector(".stream-body"),
+    statusEl: li.querySelector(".stream-status"),
+    content: "",
+    role: role || "coder",
+  };
+  state.stream.set(path, entry);
+  state.streamOrder.push(path);
+  $("stream-count").textContent = state.streamOrder.length;
+  return entry;
+}
+
+function streamFileStart(path, role) {
+  const entry = _ensureFileEntry(path, role);
+  entry.content = "";
+  entry.preEl.textContent = "";
+  entry.role = role || entry.role;
+  entry.el.className = "stream-file writing";
+  entry.statusEl.textContent = "◉";
+  entry.statusEl.title = "en écriture";
+  // Bring this file into view
+  entry.el.scrollIntoView({ behavior: "smooth", block: "nearest" });
+}
+
+function streamFileChunk(path, delta) {
+  const entry = _ensureFileEntry(path, "coder");
+  entry.content += delta;
+  if (entry.content.length > FILE_CAP) {
+    entry.content = "…" + entry.content.slice(-FILE_CAP);
+  }
+  // Append incrementally instead of replacing the whole textContent so the
+  // browser keeps the scroll position if the user isn't at the bottom.
+  entry.preEl.textContent = entry.content;
+  entry.preEl.scrollTop = entry.preEl.scrollHeight;
+}
+
+function streamFileEnd(path) {
+  const entry = state.stream.get(path);
+  if (!entry) return;
+  entry.el.className = "stream-file written";
+  entry.statusEl.textContent = "◎";
+  entry.statusEl.title = "écriture terminée";
+}
+
+function streamFileReviewStart(path) {
+  const entry = _ensureFileEntry(path, "reviewer");
+  entry.el.className = "stream-file reviewing";
+  entry.statusEl.textContent = "?";
+  entry.statusEl.title = "en relecture";
+}
+
+function streamFileReviewEnd(path, approved) {
+  const entry = state.stream.get(path);
+  if (!entry) return;
+  entry.el.className = "stream-file " + (approved ? "approved" : "rejected");
+  entry.statusEl.textContent = approved ? "✓" : "!";
+  entry.statusEl.title = approved ? "approuvé" : "rejeté";
+}
+
+function _resetStream() {
+  const list = _streamListEl();
+  if (list) list.innerHTML = "";
+  state.stream.clear();
+  state.streamOrder = [];
+  $("stream-count").textContent = "0";
+  const emptyEl = _streamEmptyEl();
+  if (emptyEl) emptyEl.classList.remove("hidden");
+}
+
 function handleEvent(id, msg) {
   if (msg.kind === "ping") return;
   if (msg.id) {
@@ -592,6 +694,36 @@ function handleEvent(id, msg) {
   if (msg.role && state.graph) {
     const intensity = msg.kind === "token" ? 0.25 : msg.kind === "agent" ? 0.75 : 0.55;
     state.graph.pulse(msg.role, intensity);
+  }
+
+  // File-level streaming events drive the "Stream" panel (live file writing
+  // + review verdicts). They're silent on the event log so they don't spam.
+  if (msg.kind === "file_start") {
+    const path = msg.data?.path || msg.message;
+    if (path) streamFileStart(path, msg.role || "coder");
+    return;
+  }
+  if (msg.kind === "file_chunk") {
+    const path = msg.data?.path;
+    const delta = msg.data?.delta || "";
+    if (path) streamFileChunk(path, delta);
+    return;
+  }
+  if (msg.kind === "file_end") {
+    const path = msg.data?.path || msg.message;
+    if (path) streamFileEnd(path);
+    return;
+  }
+  if (msg.kind === "file_review_start") {
+    const path = msg.data?.path || msg.message;
+    if (path) streamFileReviewStart(path);
+    return;
+  }
+  if (msg.kind === "file_review_end") {
+    const path = msg.data?.path || msg.message;
+    const ok = msg.data?.approved !== false;
+    if (path) streamFileReviewEnd(path, ok);
+    return;
   }
 
   if (msg.kind === "state") {

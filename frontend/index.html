@@ -81,15 +81,22 @@
             </div>
           </div>
 
-          <!-- tasks strip + events + files as collapsible drawers -->
+          <!-- live file streaming + tasks + events + artifacts as drawers -->
           <nav class="drawers">
-            <button class="drawer-tab active" data-tab="tasks">Tasks<span id="tasks-count" class="chip">0</span></button>
+            <button class="drawer-tab active" data-tab="stream">Stream<span id="stream-count" class="chip">0</span></button>
+            <button class="drawer-tab" data-tab="tasks">Tasks<span id="tasks-count" class="chip">0</span></button>
             <button class="drawer-tab" data-tab="events">Events<span id="events-count" class="chip">0</span></button>
             <button class="drawer-tab" data-tab="files">Artifacts<span id="files-count" class="chip">0</span></button>
           </nav>
 
           <div class="drawer-body">
-            <div id="pane-tasks" class="pane active">
+            <div id="pane-stream" class="pane active">
+              <div id="stream-empty" class="stream-empty">
+                En attente de l'écriture du premier fichier…
+              </div>
+              <ul id="stream" class="stream"></ul>
+            </div>
+            <div id="pane-tasks" class="pane">
               <ul id="tasks" class="tasks"></ul>
             </div>
             <div id="pane-events" class="pane">

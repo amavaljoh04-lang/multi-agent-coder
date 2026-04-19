@@ -28,6 +28,7 @@ import asyncio
 import contextlib
 import datetime as dt
 import logging
+import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -202,7 +203,7 @@ class Orchestrator:
                     task=task_dict,
                     existing_files=existing,
                     review_notes=review_notes,
-                    stream_callback=self._streamer(project_id, "coder"),
+                    stream_callback=self._coder_streamer(project_id, "coder"),
                 )
             except Exception as exc:
                 await self._bump_attempts(task.id, error=str(exc))
@@ -217,6 +218,13 @@ class Orchestrator:
             await self._set_status(project_id, ProjectStatus.REVIEWING)
             await self._set_task_status(task.id, TaskStatus.REVIEWING)
             await self.emit(project_id, "agent", "reviewer", f"[{task.title}] reviewing...")
+            # Tell the UI which files are about to be reviewed so it can pulse
+            # a "reviewing" state on each one individually.
+            for _rpath in blocks:
+                await self.emit(
+                    project_id, "file_review_start", "reviewer", _rpath,
+                    data={"path": _rpath},
+                )
 
             try:
                 review = await agents.run_reviewer(
@@ -230,6 +238,18 @@ class Orchestrator:
                 # Reviewer failing is not fatal — approve and move on.
                 await self.emit(project_id, "warning", "reviewer", f"review skipped: {exc}")
                 review = {"approved": True, "issues": [], "notes": "review unavailable"}
+
+            # Emit per-file verdicts. A file is approved if no issue mentions
+            # it by path; otherwise rejected. With the overall verdict as a
+            # safety fallback.
+            issues_text = " ".join(review.get("issues", []))
+            approved_overall = bool(review.get("approved"))
+            for _rpath in blocks:
+                file_ok = approved_overall and (_rpath not in issues_text)
+                await self.emit(
+                    project_id, "file_review_end", "reviewer", _rpath,
+                    data={"path": _rpath, "approved": file_ok},
+                )
 
             if review.get("approved"):
                 await self._set_task_status(task.id, TaskStatus.DONE)
@@ -302,7 +322,7 @@ class Orchestrator:
                     plan=plan,
                     task=synthetic_task,
                     existing_files=existing,
-                    stream_callback=self._streamer(project_id, "coder"),
+                    stream_callback=self._coder_streamer(project_id, "coder"),
                 )
                 await self._write_files(project_id, workspace, blocks)
             except Exception as exc:
@@ -391,7 +411,7 @@ class Orchestrator:
                     stderr=result.stderr,
                     analysis=analysis,
                     existing_files=files_now,
-                    stream_callback=self._streamer(project_id, "coder"),
+                    stream_callback=self._coder_streamer(project_id, "fixer"),
                 )
                 await self._write_files(project_id, workspace, fix_blocks)
                 await self.emit(
@@ -475,6 +495,7 @@ class Orchestrator:
         )
 
     def _streamer(self, project_id: str, role: str):
+        """Generic token streamer: batches deltas so the UI isn't flooded."""
         buf: list[str] = []
 
         async def _cb(delta: str) -> None:
@@ -485,6 +506,138 @@ class Orchestrator:
                     {"kind": "token", "role": role, "message": "".join(buf), "data": {}},
                 )
                 buf.clear()
+
+        return _cb
+
+    def _coder_streamer(self, project_id: str, role: str):
+        """Streamer for the coder/fixer that ALSO detects `path=...` fenced
+        file boundaries in the token flow and emits structured file events:
+
+        - ``file_start``  when a new ``\u0060\u0060\u0060path=<path>`` header appears,
+        - ``file_chunk``  with each delta inside a file body,
+        - ``file_end``    when the matching closing fence is seen.
+
+        The UI uses these to render a live "file being written" panel next to
+        the graph, so you visibly see each file filling in one after the other.
+        """
+        # Rolling buffer of all text we've seen so we can locate headers even
+        # if a token straddles a boundary.
+        seen: list[str] = []
+        token_buf: list[str] = []
+        in_file = False
+        current_path: str | None = None
+        pending_body = ""  # bytes emitted for the current file (for trimming fence)
+        header_re = re.compile(
+            r"```(?:[a-zA-Z0-9_+\-]+)?\s*path\s*[:=]\s*([^\n`]+)\n", re.DOTALL
+        )
+
+        async def flush_tokens() -> None:
+            if not token_buf:
+                return
+            await bus.publish(
+                project_id,
+                {"kind": "token", "role": role, "message": "".join(token_buf), "data": {}},
+            )
+            token_buf.clear()
+
+        async def _cb(delta: str) -> None:
+            nonlocal in_file, current_path, pending_body
+            seen.append(delta)
+            token_buf.append(delta)
+            if len(token_buf) >= 8:
+                await flush_tokens()
+
+            # Process the full seen buffer for boundary transitions. We only
+            # scan the last ~2KB window to keep it cheap.
+            text = "".join(seen)
+            # Detect file_start: find a header we haven't handled yet.
+            if not in_file:
+                m = header_re.search(text)
+                if m:
+                    path = m.group(1).strip().strip("\"'`")
+                    if path and ("/" in path or "." in path):
+                        current_path = path
+                        in_file = True
+                        pending_body = text[m.end():]
+                        # Drop everything up to and including the header so
+                        # the next search starts at the new file body.
+                        seen.clear()
+                        seen.append(pending_body)
+                        await flush_tokens()
+                        await bus.publish(
+                            project_id,
+                            {
+                                "kind": "file_start",
+                                "role": role,
+                                "message": path,
+                                "data": {"path": path},
+                            },
+                        )
+                        # Stream the initial body chunk we already have.
+                        if pending_body:
+                            await bus.publish(
+                                project_id,
+                                {
+                                    "kind": "file_chunk",
+                                    "role": role,
+                                    "message": "",
+                                    "data": {"path": path, "delta": pending_body},
+                                },
+                            )
+                return
+
+            # We are inside a file body: stream chunks until we hit a closing
+            # fence ``` on its own (end of file).
+            # The delta is the new bytes; append to pending_body and check.
+            pending_body += delta
+            close_idx = pending_body.find("\n```")
+            if close_idx == -1:
+                # Still writing the body: emit the delta as a file_chunk.
+                await bus.publish(
+                    project_id,
+                    {
+                        "kind": "file_chunk",
+                        "role": role,
+                        "message": "",
+                        "data": {"path": current_path, "delta": delta},
+                    },
+                )
+                return
+
+            # Found the closing fence. Emit the tail up to the fence, then
+            # file_end, then reset state.
+            tail = pending_body[: close_idx]
+            # We've been streaming deltas live, but the LAST delta contained
+            # the closing fence; send only the part of that delta up to the
+            # fence so the UI doesn't include "```" in the file body.
+            trim = len(delta) - (len(pending_body) - close_idx)
+            if trim > 0:
+                await bus.publish(
+                    project_id,
+                    {
+                        "kind": "file_chunk",
+                        "role": role,
+                        "message": "",
+                        "data": {"path": current_path, "delta": delta[:trim]},
+                    },
+                )
+            await bus.publish(
+                project_id,
+                {
+                    "kind": "file_end",
+                    "role": role,
+                    "message": current_path or "",
+                    "data": {"path": current_path},
+                },
+            )
+            # Reset for the next file.
+            remaining = pending_body[close_idx + 4:]  # skip "\n```"
+            in_file = False
+            current_path = None
+            pending_body = ""
+            seen.clear()
+            seen.append(remaining)
+            _ = tail  # acknowledged
 
         return _cb
 

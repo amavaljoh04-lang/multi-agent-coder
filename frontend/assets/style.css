@@ -554,6 +554,128 @@ html, body {
   white-space: pre-wrap;
 }
 
+/* ---------------- live file stream -------------------------------------- */
+
+.stream-empty {
+  padding: 18px 14px;
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  text-align: center;
+}
+.stream-empty.hidden { display: none; }
+
+.stream {
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 0;
+  margin: 0;
+}
+
+.stream-file {
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--text-dark);
+  border-radius: 4px;
+  background: var(--bg-2);
+  overflow: hidden;
+  transition: border-color 0.25s, box-shadow 0.25s;
+}
+.stream-file.writing {
+  border-left-color: var(--coder);
+  box-shadow: 0 0 18px rgba(94, 234, 212, 0.18);
+}
+.stream-file.written {
+  border-left-color: var(--architect);
+}
+.stream-file.reviewing {
+  border-left-color: var(--reviewer);
+  box-shadow: 0 0 18px rgba(251, 191, 36, 0.2);
+}
+.stream-file.approved {
+  border-left-color: var(--ok);
+  opacity: 0.85;
+}
+.stream-file.rejected {
+  border-left-color: var(--danger);
+  box-shadow: 0 0 18px rgba(239, 68, 68, 0.22);
+}
+
+.stream-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 10px;
+  background: var(--bg-3);
+  border-bottom: 1px solid var(--line);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+}
+.stream-status {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--bg);
+  background: var(--coder);
+}
+.stream-file.writing .stream-status {
+  background: var(--coder);
+  animation: stream-pulse 1.1s ease-in-out infinite;
+}
+.stream-file.written .stream-status { background: var(--architect); }
+.stream-file.reviewing .stream-status {
+  background: var(--reviewer);
+  animation: stream-pulse 1.1s ease-in-out infinite;
+}
+.stream-file.approved .stream-status { background: var(--ok); }
+.stream-file.rejected .stream-status { background: var(--danger); }
+
+@keyframes stream-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 currentColor; transform: scale(1); }
+  50%      { box-shadow: 0 0 10px 2px currentColor; transform: scale(1.08); }
+}
+
+.stream-path {
+  flex: 1;
+  color: var(--text);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.stream-agent {
+  font-size: 9.5px;
+  letter-spacing: 1.6px;
+  padding: 2px 6px;
+  border: 1px solid var(--line);
+  border-radius: 3px;
+  color: var(--text-dim);
+}
+.stream-agent.r-coder    { color: var(--coder);    border-color: rgba(94,234,212,0.35); }
+.stream-agent.r-fixer    { color: var(--analyst);  border-color: rgba(255,62,165,0.35); }
+.stream-agent.r-reviewer { color: var(--reviewer); border-color: rgba(251,191,36,0.35); }
+
+.stream-body {
+  margin: 0;
+  padding: 8px 10px;
+  max-height: 180px;
+  overflow-y: auto;
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: #02040a;
+}
+
 /* ---------------- responsive -------------------------------------------- */
 
 @media (max-width: 860px) {
