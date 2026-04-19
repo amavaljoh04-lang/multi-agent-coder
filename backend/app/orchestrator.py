@@ -538,8 +538,26 @@ class Orchestrator:
         if not await self._gate_all_files_exist(project_id, plan, workspace, stop):
             return
 
+        # Absolute safety cap, independent of max_iterations. max_iterations
+        # may be -1 (unlimited) but the test/fix loop is still bounded: if
+        # we haven't converged after this many attempts, something is
+        # structurally wrong (wrong test command, impossible spec, missing
+        # dependency) and no amount of retrying will help.
+        HARD_CAP = 25
+        # Stop after this many consecutive iterations with no actual file
+        # change from the fixer. This catches the "fixer keeps producing
+        # empty blocks / identical output" infinite-loop scenario.
+        NO_PROGRESS_LIMIT = 3
+        # Minimum wall-clock time per iteration. Prevents CPU-spinning when
+        # the test command fails instantly and the fixer also errors out
+        # (caught exception path). 10s is enough to notice in the UI.
+        MIN_ITERATION_SECONDS = 10.0
+
         iteration = 0
+        no_progress = 0
+        last_stderr_sig: str | None = None
         while not stop.is_set():
+            iteration_start = asyncio.get_event_loop().time()
             iteration += 1
             await self._update(project_id, iteration=iteration)
             await self._set_status(project_id, ProjectStatus.TESTING)
@@ -560,6 +578,14 @@ class Orchestrator:
             if result.exit_code == 0:
                 await self.emit(project_id, "test", "", f"Iteration {iteration}: PASSED")
                 return
+
+            # Signature of this failure (last 500 chars of stderr). Used to
+            # detect "same error as last iteration" even if the fixer did
+            # touch files but didn't actually fix anything.
+            stderr_sig = (result.stderr or "")[-500:].strip()
+            same_error_as_before = (
+                last_stderr_sig is not None and stderr_sig == last_stderr_sig
+            )
 
             # Analyst + coder patch loop
             await self._set_status(project_id, ProjectStatus.FIXING)
@@ -585,15 +611,16 @@ class Orchestrator:
                 analysis = f"(analyst unavailable: {exc})"
             await self.emit(project_id, "agent", "tester", analysis)
 
+            files_before = await self._collect_files(project_id)
+            fix_blocks: dict[str, str] = {}
             try:
-                files_now = await self._collect_files(project_id)
                 fix_blocks = await agents.run_fix(
                     self.router,
                     plan=plan,
                     stdout=result.stdout,
                     stderr=result.stderr,
                     analysis=analysis,
-                    existing_files=files_now,
+                    existing_files=files_before,
                     stream_callback=self._coder_streamer(project_id, "fixer"),
                 )
                 await self._write_files(project_id, workspace, fix_blocks)
@@ -603,9 +630,50 @@ class Orchestrator:
                     data={"files": list(fix_blocks)},
                 )
             except Exception as exc:
-                await self.emit(project_id, "error", "coder", f"Patch failed: {exc}")
-                await asyncio.sleep(5)
+                await self.emit(
+                    project_id, "error", "coder", f"Patch failed: {exc}",
+                )
 
+            # Did the fixer actually change anything on disk?
+            actually_changed = any(
+                files_before.get(p) != c for p, c in fix_blocks.items()
+            )
+
+            if not actually_changed or same_error_as_before:
+                no_progress += 1
+                await self.emit(
+                    project_id, "warning", "fixer",
+                    f"Iteration {iteration}: no progress "
+                    f"({no_progress}/{NO_PROGRESS_LIMIT}) — "
+                    + (
+                        "fixer returned no file changes"
+                        if not actually_changed
+                        else "same stderr as previous iteration"
+                    ),
+                )
+            else:
+                no_progress = 0
+            last_stderr_sig = stderr_sig
+
+            # Bail conditions, in order of priority.
+            if no_progress >= NO_PROGRESS_LIMIT:
+                await self._set_status(
+                    project_id, ProjectStatus.FAILED,
+                    last_error=(
+                        f"test/fix loop stalled: {no_progress} iterations "
+                        f"without progress. Last stderr:\n{stderr_sig}"
+                    ),
+                )
+                return
+            if iteration >= HARD_CAP:
+                await self._set_status(
+                    project_id, ProjectStatus.FAILED,
+                    last_error=(
+                        f"test/fix loop hit hard cap ({HARD_CAP} iterations) "
+                        f"without passing tests. Last stderr:\n{stderr_sig}"
+                    ),
+                )
+                return
             if max_iter != -1 and iteration >= max_iter:
                 await self._set_status(
                     project_id, ProjectStatus.FAILED,
@@ -615,6 +683,14 @@ class Orchestrator:
 
             # Heartbeat so watchers know we're still alive.
             await self._update(project_id, heartbeat_at=dt.datetime.now(dt.UTC))
+
+            # Minimum iteration duration: if everything failed fast (e.g.
+            # analyst threw, fixer threw, test command instantly returned
+            # exit 1) we'd otherwise spin at CPU speed. Sleep the remainder
+            # so the UI stays legible and we don't burn the CPU.
+            elapsed = asyncio.get_event_loop().time() - iteration_start
+            if elapsed < MIN_ITERATION_SECONDS:
+                await asyncio.sleep(MIN_ITERATION_SECONDS - elapsed)
 
     # ---------------------------------------------------------- persistence
 
