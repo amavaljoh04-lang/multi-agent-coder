@@ -225,8 +225,11 @@ class Orchestrator:
             else:
                 notes = "\n".join(f"- {i}" for i in review.get("issues", []))
                 await self._bump_attempts(task.id, review_notes=notes)
+                # Use "warning" so the reviewer's issue list shows up in the
+                # compact event log (expandable) rather than flashing through
+                # the live agent row.
                 await self.emit(
-                    project_id, "agent", "reviewer", f"[{task.title}] rejected",
+                    project_id, "warning", "reviewer", f"[{task.title}] rejected",
                     data={"issues": review.get("issues", [])},
                 )
                 if task.attempts + 1 >= max_reviews:
@@ -275,6 +278,12 @@ class Orchestrator:
             await self.emit(
                 project_id, "test", "",
                 f"Iteration {iteration}: FAILED (exit {result.exit_code}) — analysing",
+                data={
+                    "exit_code": result.exit_code,
+                    "stdout": result.stdout[-4000:],
+                    "stderr": result.stderr[-4000:],
+                    "command": script,
+                },
             )
             try:
                 analysis = await agents.run_tester_analyst(

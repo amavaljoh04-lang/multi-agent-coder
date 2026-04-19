@@ -340,6 +340,21 @@ a { color: var(--accent-2); }
 .log-time { color: #555; margin-right: 6px; font-size: 10px; }
 .log-msg { white-space: pre-wrap; }
 .log-count { color: var(--accent); margin-left: 6px; font-size: 10px; font-weight: 700; }
+.log-toggle { display: inline-block; width: 12px; color: var(--text-dim); margin-right: 4px; user-select: none; }
+.log-details {
+  margin: 6px 0 4px 22px;
+  padding: 8px 10px;
+  background: #030510;
+  border-left: 2px solid var(--accent);
+  border-radius: 0 4px 4px 0;
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.log-details.hidden { display: none; }
 
 .files { list-style: none; padding: 0; margin: 0 0 8px; max-height: 35%; overflow-y: auto; }
 .files li {

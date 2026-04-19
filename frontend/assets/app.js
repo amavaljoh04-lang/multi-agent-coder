@@ -254,10 +254,47 @@ function appendLog(msg) {
   div.className = `log-line k-${msg.kind}`;
   const time = new Date().toLocaleTimeString();
   const role = msg.role ? `<span class="log-role r-${msg.role}">${escape(msg.role)}</span>` : "";
+
+  const data = msg.data || {};
+  const hasDetails =
+    (data.stderr && data.stderr.length) ||
+    (data.stdout && data.stdout.length) ||
+    (data.command && data.command.length) ||
+    (Array.isArray(data.files) && data.files.length) ||
+    (Array.isArray(data.issues) && data.issues.length);
+
+  const marker = hasDetails ? '<span class="log-toggle">▸</span>' : "";
   div.innerHTML =
-    `<span class="log-time">${time}</span>${role}` +
+    `<span class="log-time">${time}</span>${role}${marker}` +
     `<span class="log-msg">${escape(msg.message || "")}</span>` +
     `<span class="log-count"></span>`;
+
+  if (hasDetails) {
+    const details = document.createElement("pre");
+    details.className = "log-details hidden";
+    const parts = [];
+    if (data.command) parts.push(`$ ${data.command}`);
+    if (data.exit_code !== undefined) parts.push(`exit code: ${data.exit_code}`);
+    if (Array.isArray(data.files) && data.files.length) {
+      parts.push(`files patched:\n  - ${data.files.join("\n  - ")}`);
+    }
+    if (Array.isArray(data.issues) && data.issues.length) {
+      parts.push(`issues:\n  - ${data.issues.join("\n  - ")}`);
+    }
+    if (data.stdout) parts.push(`--- stdout ---\n${data.stdout}`);
+    if (data.stderr) parts.push(`--- stderr ---\n${data.stderr}`);
+    details.textContent = parts.join("\n\n");
+    div.appendChild(details);
+    div.querySelector(".log-toggle").style.cursor = "pointer";
+    div.querySelector(".log-msg").style.cursor = "pointer";
+    const toggle = () => {
+      details.classList.toggle("hidden");
+      div.querySelector(".log-toggle").textContent = details.classList.contains("hidden") ? "▸" : "▾";
+    };
+    div.querySelector(".log-toggle").addEventListener("click", toggle);
+    div.querySelector(".log-msg").addEventListener("click", toggle);
+  }
+
   logs.appendChild(div);
   state.lastLogKey = key;
   state.lastLogCount = 1;
