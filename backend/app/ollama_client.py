@@ -105,6 +105,7 @@ class OllamaRouter:
         json_mode: bool = False,
         temperature: float | None = None,
         num_ctx: int | None = None,
+        num_predict: int | None = None,
         stream_callback: Any | None = None,
     ) -> str:
         """Full (non-streaming from caller POV) chat completion.
@@ -127,6 +128,7 @@ class OllamaRouter:
                     json_mode=json_mode,
                     temperature=temperature if temperature is not None else rc.temperature,
                     num_ctx=num_ctx if num_ctx is not None else rc.num_ctx,
+                    num_predict=num_predict if num_predict is not None else rc.num_predict,
                     stream_callback=stream_callback,
                 )
             except Exception as exc:
@@ -148,13 +150,18 @@ class OllamaRouter:
         json_mode: bool,
         temperature: float,
         num_ctx: int,
+        num_predict: int,
         stream_callback: Any | None,
     ) -> str:
         body: dict[str, Any] = {
             "model": pick.model,
             "messages": messages,
             "stream": True,
-            "options": {"temperature": temperature, "num_ctx": num_ctx},
+            "options": {
+                "temperature": temperature,
+                "num_ctx": num_ctx,
+                "num_predict": num_predict,
+            },
             "keep_alive": "30m",
         }
         if json_mode:

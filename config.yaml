@@ -39,6 +39,7 @@ roles:
       - { server: gpu4060, model: "qwen2.5-coder:7b" }
     temperature: 0.2
     num_ctx: 16384
+    num_predict: 8192
 
   # High-level architecture: file tree, specs, interfaces.
   architect:
@@ -48,6 +49,7 @@ roles:
       - { server: gpu4060, model: "qwen2.5-coder:7b" }
     temperature: 0.3
     num_ctx: 16384
+    num_predict: 8192
 
   # Main code writer.
   coder:
@@ -58,6 +60,7 @@ roles:
       - { server: gpu4060, model: "deepseek-coder:6.7b" }
     temperature: 0.15
     num_ctx: 16384
+    num_predict: 8192
 
   # Reviews code written by the coder (different base for diversity).
   reviewer:
@@ -67,6 +70,7 @@ roles:
       - { server: gpu4060, model: "qwen2.5-coder:7b" }
     temperature: 0.1
     num_ctx: 16384
+    num_predict: 4096
 
   # Analyses test failures / stack traces and proposes a fix plan.
   tester_analyst:
@@ -76,6 +80,7 @@ roles:
       - { server: gpu4060, model: "qwen2.5-coder:7b" }
     temperature: 0.1
     num_ctx: 12288
+    num_predict: 4096
 
   # Dedicated fixer: applies the smallest possible patch given an analyst
   # report or an in-loop static-check error. Temperature 0, strict prompt.
@@ -87,6 +92,7 @@ roles:
       - { server: gpu4060, model: "deepseek-coder:6.7b" }
     temperature: 0.0
     num_ctx: 16384
+    num_predict: 8192
 
   # Cheap dispatcher / classification tasks.
   dispatcher:
@@ -96,6 +102,7 @@ roles:
       - { server: gpu4060, model: "mistral:latest" }
     temperature: 0.0
     num_ctx: 4096
+    num_predict: 1024
 
 orchestrator:
   # Max number of test/fix iterations per project (-1 = unlimited, bounded

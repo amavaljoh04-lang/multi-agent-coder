@@ -30,6 +30,12 @@ class RoleConfig(BaseModel):
     fallbacks: list[ModelPick] = Field(default_factory=list)
     temperature: float = 0.2
     num_ctx: int = 8192
+    # Maximum tokens the model may emit in a single response. Ollama's
+    # default is only 128 which truncates anything longer than a few lines
+    # (e.g. a full README or a multi-file Coder response). 4096 is a safe
+    # upper bound for single-file generation; the orchestrator clamps
+    # total usage via num_ctx and per-role timeouts.
+    num_predict: int = 4096
 
     def candidates(self) -> list[ModelPick]:
         return [self.primary, *self.fallbacks]
