@@ -42,9 +42,15 @@ class Sandbox:
         return await self._run_docker(workspace, command)
 
     async def _run_local(self, workspace: Path, command: str) -> RunResult:
-        env_prefix = f"PYTHONPATH={shlex.quote(str(workspace.resolve()))}:${{PYTHONPATH:-}} "
+        # IMPORTANT: use ``export`` rather than the one-shot ``VAR=val cmd``
+        # form. Our test command is typically ``pip install X && pytest``;
+        # with a one-shot prefix, PYTHONPATH would only apply to ``pip``
+        # and pytest would then fail with ``ModuleNotFoundError`` on the
+        # project's own modules.
+        ws = shlex.quote(str(workspace.resolve()))
+        full = f"export PYTHONPATH={ws}:${{PYTHONPATH:-}}; {command}"
         return await _exec_shell(
-            env_prefix + command, cwd=workspace, timeout=self.cfg.sandbox_timeout
+            full, cwd=workspace, timeout=self.cfg.sandbox_timeout
         )
 
     async def _run_docker(self, workspace: Path, command: str) -> RunResult:
