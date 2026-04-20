@@ -51,10 +51,12 @@
             <div class="proj-meta">
               <h2 id="proj-title">—</h2>
               <span id="proj-status" class="status-pill">—</span>
+              <span id="proj-progress" class="proj-progress"></span>
             </div>
             <div class="proj-actions">
               <button id="btn-pause" class="btn-icon" title="Pause">❚❚</button>
               <button id="btn-resume" class="btn-icon" title="Reprendre">▶</button>
+              <button id="btn-stop" class="btn-icon danger" title="Arrêter le projet">STOP</button>
               <a id="btn-zip" class="btn-icon zip hidden" href="#" download title="Télécharger ZIP">⬇ ZIP</a>
               <button id="btn-delete" class="btn-icon danger" title="Supprimer">✕</button>
             </div>
@@ -91,9 +93,23 @@
                   <span class="zip-banner-sub">Livraison complète</span>
                 </span>
               </a>
-              <ul id="files" class="files"></ul>
-              <pre id="file-preview" class="file-preview"></pre>
+              <div class="files-split">
+                <div id="files-tree" class="files-tree"></div>
+                <pre id="file-preview" class="file-preview">Sélectionne un fichier pour voir son contenu.</pre>
+              </div>
             </div>
+          </div>
+
+          <div class="chat-mailbox">
+            <div class="chat-head">
+              Note pour les agents
+              <span class="chat-hint">les agents la lisent à leur prochaine itération</span>
+            </div>
+            <form id="note-form" class="chat-form">
+              <textarea id="note-input" rows="2"
+                placeholder="Ex. utilise tailwind ; le dernier fix était faux, revert ; ajoute un endpoint DELETE…"></textarea>
+              <button type="submit" class="btn primary">Envoyer</button>
+            </form>
           </div>
         </div>
       </section>

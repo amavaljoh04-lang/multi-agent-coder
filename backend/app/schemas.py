@@ -82,4 +82,18 @@ class ServerStatus(BaseModel):
 
 
 class ControlRequest(BaseModel):
-    action: str  # pause / resume / cancel / retry
+    action: str  # pause / resume / stop / retry
+
+
+class CreateNoteRequest(BaseModel):
+    content: str = Field(..., min_length=1, max_length=4000)
+
+
+class NoteView(BaseModel):
+    id: str
+    content: str
+    acknowledged: bool
+    created_at: dt.datetime
+
+    class Config:
+        from_attributes = True

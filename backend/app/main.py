@@ -16,14 +16,16 @@ from sqlalchemy import desc, select
 from .config import get_config, get_settings
 from .database import SessionLocal, init_db
 from .events import bus
-from .models import Event, Project, ProjectFile, ProjectStatus, Task
+from .models import Event, Project, ProjectFile, ProjectNote, ProjectStatus, Task
 from .ollama_client import get_router, shutdown_router
 from .orchestrator import get_orchestrator
 from .schemas import (
     ControlRequest,
+    CreateNoteRequest,
     CreateProjectRequest,
     EventView,
     FileView,
+    NoteView,
     ProjectDetail,
     ProjectSummary,
     ServerStatus,
@@ -224,9 +226,60 @@ async def control_project(project_id: str, req: ControlRequest) -> dict:
         await orch.pause(project_id)
     elif req.action in {"resume", "retry"}:
         await orch.enqueue(project_id)
+    elif req.action == "stop":
+        # Hard-stop: cancel the asyncio task and mark the project FAILED so
+        # the user can see why it stopped. Project row is kept (unlike
+        # delete) so the user can inspect what was produced.
+        await orch.stop(project_id)
     else:
         raise HTTPException(400, f"Unknown action {req.action}")
     return {"ok": True}
+
+
+@app.get("/api/projects/{project_id}/notes", response_model=list[NoteView])
+async def list_notes(project_id: str) -> list[NoteView]:
+    async with SessionLocal() as s:
+        rows = (
+            await s.execute(
+                select(ProjectNote)
+                .where(ProjectNote.project_id == project_id)
+                .order_by(ProjectNote.created_at)
+            )
+        ).scalars().all()
+        return [
+            NoteView(
+                id=r.id,
+                content=r.content,
+                acknowledged=bool(r.acknowledged),
+                created_at=r.created_at,
+            )
+            for r in rows
+        ]
+
+
+@app.post("/api/projects/{project_id}/notes", response_model=NoteView)
+async def add_note(project_id: str, req: CreateNoteRequest) -> NoteView:
+    async with SessionLocal() as s:
+        project = await s.get(Project, project_id)
+        if project is None:
+            raise HTTPException(404, "Project not found")
+        note = ProjectNote(project_id=project_id, content=req.content.strip())
+        s.add(note)
+        await s.commit()
+        await s.refresh(note)
+    # Surface the note in the event stream so it appears in the Journal.
+    await get_orchestrator().emit(
+        project_id,
+        "info",
+        "user",
+        f"Note de l'utilisateur : {req.content.strip()[:200]}",
+    )
+    return NoteView(
+        id=note.id,
+        content=note.content,
+        acknowledged=bool(note.acknowledged),
+        created_at=note.created_at,
+    )
 
 
 @app.get("/api/projects/{project_id}/zip")

@@ -24,6 +24,8 @@ const state = {
   eventCount: 0,
   stream: new Map(), // path -> { el, preEl, statusEl, content, role }
   streamOrder: [],
+  currentProject: null, // last-loaded snapshot for progress counters
+  selectedFile: null,
 };
 
 const FILE_CAP = 8000; // max characters kept in the live pre per file
@@ -108,15 +110,18 @@ async function openProject(id) {
   state.lastLogCountEl = null;
   state.lastLogCount = 1;
   state.eventCount = 0;
+  state.currentProject = null;
+  state.selectedFile = null;
   $("empty-state").classList.add("hidden");
   $("project-view").classList.remove("hidden");
   $("logs").innerHTML = "";
-  $("file-preview").textContent = "";
+  $("file-preview").textContent = "Sélectionne un fichier pour voir son contenu.";
   $("current-action").textContent = "Initialisation…";
   $("events-count").textContent = "0";
+  $("proj-progress").innerHTML = "";
   _resetStream();
   if (window.innerWidth <= 860) $("sidebar").classList.remove("open");
-  await Promise.all([loadProject(id), subscribe(id)]);
+  await Promise.all([loadProject(id), loadNotes(id), subscribe(id)]);
   refreshProjects();
 }
 
@@ -124,6 +129,7 @@ async function loadProject(id) {
   const r = await fetch(`/api/projects/${id}`);
   if (!r.ok) return;
   const p = await r.json();
+  state.currentProject = p;
   $("proj-title").textContent = p.name;
   setStatus(p.status);
   $("btn-zip").href = `/api/projects/${id}/zip`;
@@ -147,23 +153,94 @@ async function loadProject(id) {
   }
   $("tasks-count").textContent = p.tasks.length;
 
-  const files = $("files");
-  files.innerHTML = "";
-  for (const f of p.files) {
-    const li = document.createElement("li");
-    li.textContent = `${f.path}  r${f.revision}`;
-    li.onclick = async () => {
-      const r2 = await fetch(`/api/projects/${id}/files/${encodeURI(f.path)}`);
-      if (r2.ok) {
-        const d = await r2.json();
-        $("file-preview").textContent = d.content;
-        for (const x of files.children) x.classList.remove("active");
-        li.classList.add("active");
-      }
-    };
-    files.appendChild(li);
-  }
+  renderFileTree(id, p.files);
   $("files-count").textContent = p.files.length;
+  updateProgress();
+}
+
+// ============================================================================
+// Progress counters (header chip)
+// ============================================================================
+
+function updateProgress() {
+  const p = state.currentProject;
+  const el = $("proj-progress");
+  if (!p) { el.innerHTML = ""; return; }
+  const totalTasks = p.tasks.length;
+  const doneTasks = p.tasks.filter((t) => t.status === "done").length;
+  const plannedFiles = new Set();
+  for (const t of p.tasks) for (const fp of (t.file_paths || [])) plannedFiles.add(fp);
+  const writtenFiles = p.files.length;
+  const totalFiles = Math.max(plannedFiles.size, writtenFiles);
+  el.innerHTML =
+    `<b>${writtenFiles}</b>/${totalFiles || "?"} fichiers` +
+    `<span class="sep">·</span>` +
+    `<b>${doneTasks}</b>/${totalTasks || "?"} tâches`;
+}
+
+// ============================================================================
+// File tree (Livrables tab)
+// ============================================================================
+
+function renderFileTree(projectId, files) {
+  const root = $("files-tree");
+  root.innerHTML = "";
+  if (!files.length) {
+    const empty = document.createElement("div");
+    empty.className = "tree-node";
+    empty.style.color = "var(--muted)";
+    empty.style.fontStyle = "italic";
+    empty.textContent = "Aucun fichier écrit pour l'instant.";
+    root.appendChild(empty);
+    return;
+  }
+  // Build an object tree from flat paths.
+  const tree = {};
+  for (const f of files) {
+    const parts = f.path.split("/");
+    let node = tree;
+    for (let i = 0; i < parts.length - 1; i++) {
+      node[parts[i]] = node[parts[i]] || {};
+      node = node[parts[i]];
+    }
+    node[parts[parts.length - 1]] = { __file: f };
+  }
+  const walk = (node, depth, prefix) => {
+    const entries = Object.entries(node).sort(([a, av], [b, bv]) => {
+      const aIsDir = !av.__file;
+      const bIsDir = !bv.__file;
+      if (aIsDir !== bIsDir) return aIsDir ? -1 : 1;
+      return a.localeCompare(b);
+    });
+    for (const [name, child] of entries) {
+      const div = document.createElement("div");
+      div.style.paddingLeft = `${depth * 14 + 4}px`;
+      if (child.__file) {
+        div.className = "tree-node file";
+        const f = child.__file;
+        div.innerHTML = `📄 ${escape(name)}<span class="rev">r${f.revision}</span>`;
+        div.addEventListener("click", () => selectFile(projectId, f.path, div));
+        if (state.selectedFile === f.path) div.classList.add("active");
+      } else {
+        div.className = "tree-node dir";
+        div.textContent = `📁 ${name}/`;
+      }
+      root.appendChild(div);
+      if (!child.__file) walk(child, depth + 1, prefix + name + "/");
+    }
+  };
+  walk(tree, 0, "");
+}
+
+async function selectFile(projectId, path, divEl) {
+  state.selectedFile = path;
+  for (const x of document.querySelectorAll(".tree-node.file")) x.classList.remove("active");
+  divEl.classList.add("active");
+  const r = await fetch(`/api/projects/${projectId}/files/${encodeURI(path)}`);
+  if (r.ok) {
+    const d = await r.json();
+    $("file-preview").textContent = d.content;
+  }
 }
 
 function setStatus(status) {
@@ -366,50 +443,39 @@ function appendLog(msg) {
     return;
   }
   const div = document.createElement("div");
-  div.className = `log-line k-${msg.kind}`;
+  div.className = `log-line k-${msg.kind}` + (msg.role ? ` r-${msg.role}` : "");
   const time = new Date().toLocaleTimeString();
   const role = msg.role ? `<span class="log-role">${escape(msg.role)}</span>` : "";
 
   const data = msg.data || {};
-  const hasDetails =
-    (data.stderr && data.stderr.length) ||
-    (data.stdout && data.stdout.length) ||
-    (data.command && data.command.length) ||
-    (Array.isArray(data.files) && data.files.length) ||
-    (Array.isArray(data.issues) && data.issues.length);
+  const parts = [];
+  if (data.command) parts.push(`$ ${data.command}`);
+  if (data.exit_code !== undefined) parts.push(`exit code: ${data.exit_code}`);
+  if (Array.isArray(data.files) && data.files.length) {
+    parts.push(`files patched:\n  - ${data.files.join("\n  - ")}`);
+  }
+  if (Array.isArray(data.issues) && data.issues.length) {
+    parts.push(`issues:\n  - ${data.issues.join("\n  - ")}`);
+  }
+  if (data.stdout) parts.push(`--- stdout ---\n${data.stdout}`);
+  if (data.stderr) parts.push(`--- stderr ---\n${data.stderr}`);
+  const detailsText = parts.join("\n\n");
 
-  const marker = hasDetails ? '<span class="log-toggle">▸</span>' : "";
   div.innerHTML =
-    `<span class="log-time">${time}</span>${role}${marker}` +
+    `<span class="log-time">${time}</span>${role}` +
     `<span class="log-msg">${escape(msg.message || "")}</span>` +
     `<span class="log-count"></span>`;
 
-  if (hasDetails) {
+  if (detailsText) {
     const details = document.createElement("pre");
-    details.className = "log-details hidden";
-    const parts = [];
-    if (data.command) parts.push(`$ ${data.command}`);
-    if (data.exit_code !== undefined) parts.push(`exit code: ${data.exit_code}`);
-    if (Array.isArray(data.files) && data.files.length) {
-      parts.push(`files patched:\n  - ${data.files.join("\n  - ")}`);
-    }
-    if (Array.isArray(data.issues) && data.issues.length) {
-      parts.push(`issues:\n  - ${data.issues.join("\n  - ")}`);
-    }
-    if (data.stdout) parts.push(`--- stdout ---\n${data.stdout}`);
-    if (data.stderr) parts.push(`--- stderr ---\n${data.stderr}`);
-    details.textContent = parts.join("\n\n");
+    // Inline by default (no click-to-expand) so pytest / stderr output is
+    // immediately visible. Colored red for errors so failures pop.
+    let cls = "log-details";
+    if (msg.kind === "error") cls += " err";
+    else if (msg.kind === "warning") cls += " warn";
+    details.className = cls;
+    details.textContent = detailsText;
     div.appendChild(details);
-    const toggleEl = div.querySelector(".log-toggle");
-    const msgEl = div.querySelector(".log-msg");
-    toggleEl.style.cursor = "pointer";
-    msgEl.style.cursor = "pointer";
-    const toggle = () => {
-      details.classList.toggle("hidden");
-      toggleEl.textContent = details.classList.contains("hidden") ? "▸" : "▾";
-    };
-    toggleEl.addEventListener("click", toggle);
-    msgEl.addEventListener("click", toggle);
   }
 
   logs.appendChild(div);
@@ -420,6 +486,34 @@ function appendLog(msg) {
   $("events-count").textContent = state.eventCount;
   while (logs.children.length > 200) logs.removeChild(logs.firstChild);
   logs.scrollTop = logs.scrollHeight;
+}
+
+// ============================================================================
+// Notes mailbox
+// ============================================================================
+
+async function loadNotes(id) {
+  try {
+    const r = await fetch(`/api/projects/${id}/notes`);
+    if (!r.ok) return;
+    const notes = await r.json();
+    for (const n of notes) {
+      appendLog({
+        kind: "info",
+        role: "user",
+        message: `Note de l'utilisateur : ${n.content}`,
+      });
+    }
+  } catch (_) { /* silent */ }
+}
+
+async function postNote(id, content) {
+  const r = await fetch(`/api/projects/${id}/notes`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ content }),
+  });
+  return r.ok;
 }
 
 // ============================================================================
@@ -462,6 +556,36 @@ $("btn-resume").addEventListener("click", async () => {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action: "resume" }),
   });
+});
+$("btn-stop").addEventListener("click", async () => {
+  if (!state.currentId) return;
+  if (!confirm("Arrêter le projet en cours ? Les fichiers déjà écrits sont conservés.")) return;
+  await fetch(`/api/projects/${state.currentId}/control`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action: "stop" }),
+  });
+});
+$("note-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  if (!state.currentId) return;
+  const ta = $("note-input");
+  const content = ta.value.trim();
+  if (!content) return;
+  const ok = await postNote(state.currentId, content);
+  if (ok) {
+    ta.value = "";
+    // Event stream will surface it as an "info" log (server-side emit).
+  } else {
+    alert("Envoi de la note échoué");
+  }
+});
+// Submit on Ctrl+Enter / Cmd+Enter so users don't have to reach for the button.
+$("note-input").addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+    e.preventDefault();
+    $("note-form").dispatchEvent(new Event("submit", { cancelable: true }));
+  }
 });
 $("btn-delete").addEventListener("click", async () => {
   if (!state.currentId) return;

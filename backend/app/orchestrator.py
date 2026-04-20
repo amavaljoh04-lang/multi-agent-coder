@@ -40,7 +40,7 @@ from . import agents
 from .config import get_config, get_settings
 from .database import SessionLocal
 from .events import bus
-from .models import Event, Project, ProjectFile, ProjectStatus, Task, TaskStatus, TestRun
+from .models import Event, Project, ProjectFile, ProjectNote, ProjectStatus, Task, TaskStatus, TestRun
 from .ollama_client import OllamaRouter, get_router
 from .sandbox import Sandbox
 
@@ -84,6 +84,21 @@ class Orchestrator:
                 await task
         self._tasks.pop(project_id, None)
         self._stop.pop(project_id, None)
+
+    async def stop(self, project_id: str) -> None:
+        """User-initiated hard STOP.
+
+        Unlike ``pause`` (which sets PAUSED and can be resumed) and
+        ``cancel`` (which is used internally by delete), this marks the
+        project FAILED with a clear ``last_error`` so it's obvious in the
+        UI that the user killed it, and the workspace / files are kept for
+        inspection.
+        """
+        await self.cancel(project_id)
+        await self.emit(project_id, "warning", "user", "Projet arrêté par l'utilisateur")
+        await self._set_status(
+            project_id, ProjectStatus.FAILED, last_error="stopped_by_user"
+        )
 
     async def resume_all(self) -> None:
         """Re-enqueue any project that was running when the server last died."""
@@ -183,9 +198,10 @@ class Orchestrator:
         if project.status in (ProjectStatus.CREATED, ProjectStatus.PLANNING):
             await self._set_status(project_id, ProjectStatus.PLANNING)
             await self.emit(project_id, "agent", "planner", "Planning project...")
+            planner_prompt = await self._augment_prompt(project_id, project.prompt)
             plan = await agents.run_planner(
                 self.router,
-                project.prompt,
+                planner_prompt,
                 stream_callback=self._streamer(project_id, "planner"),
             )
             await self._save_plan(project_id, plan)
@@ -195,6 +211,7 @@ class Orchestrator:
         if project.status in (ProjectStatus.PLANNING, ProjectStatus.ARCHITECTING):
             await self._set_status(project_id, ProjectStatus.ARCHITECTING)
             await self.emit(project_id, "agent", "architect", "Designing file specs...")
+            plan = await self._inject_user_notes(project_id, plan)
             try:
                 arch = await agents.run_architect(
                     self.router, plan, stream_callback=self._streamer(project_id, "architect")
@@ -293,6 +310,7 @@ class Orchestrator:
         max_reviews = self.cfg.orchestrator.max_review_retries
         existing = await self._collect_files(project_id)
         review_notes = task.review_notes or ""
+        plan = await self._inject_user_notes(project_id, plan)
 
         await self.emit(
             project_id, "agent", "coder",
@@ -528,7 +546,12 @@ class Orchestrator:
         install_cmd = plan.get("install_command") or ""
         test_cmd = plan.get("test_command") or ""
         if not test_cmd:
-            await self.emit(project_id, "warning", "tester", "No test_command in plan — skipping tests")
+            # Tiny / trivial project — planner explicitly opted out of tests.
+            # This is a legitimate success path, not a warning.
+            await self.emit(
+                project_id, "info", "tester",
+                "No test_command in plan — project does not require tests, skipping",
+            )
             return
 
         # Gate: every file listed in the plan must exist on disk before we
@@ -559,6 +582,10 @@ class Orchestrator:
         while not stop.is_set():
             iteration_start = asyncio.get_event_loop().time()
             iteration += 1
+            # Pick up any notes the user added since the last iteration so
+            # the fixer (called later in this iteration on failure) sees
+            # them in the plan JSON.
+            plan = await self._inject_user_notes(project_id, plan)
             await self._update(project_id, iteration=iteration)
             await self._set_status(project_id, ProjectStatus.TESTING)
             await self.emit(
@@ -707,6 +734,78 @@ class Orchestrator:
             elapsed = asyncio.get_event_loop().time() - iteration_start
             if elapsed < MIN_ITERATION_SECONDS:
                 await asyncio.sleep(MIN_ITERATION_SECONDS - elapsed)
+
+    # ------------------------------------------------------------- user notes
+
+    async def _fetch_pending_notes(self, project_id: str) -> list[ProjectNote]:
+        """Return notes the user posted since the last acknowledgement.
+
+        The next agent iteration calls :meth:`_ack_notes` after consuming
+        them so they aren't re-injected forever.
+        """
+        async with SessionLocal() as s:
+            rows = (
+                await s.execute(
+                    select(ProjectNote)
+                    .where(
+                        ProjectNote.project_id == project_id,
+                        ProjectNote.acknowledged == 0,
+                    )
+                    .order_by(ProjectNote.created_at)
+                )
+            ).scalars().all()
+            return list(rows)
+
+    async def _ack_notes(self, notes: list[ProjectNote]) -> None:
+        if not notes:
+            return
+        ids = [n.id for n in notes]
+        async with SessionLocal() as s:
+            rows = (
+                await s.execute(
+                    select(ProjectNote).where(ProjectNote.id.in_(ids))
+                )
+            ).scalars().all()
+            for r in rows:
+                r.acknowledged = 1
+            await s.commit()
+
+    @staticmethod
+    def _format_notes(notes: list[ProjectNote]) -> str:
+        if not notes:
+            return ""
+        lines = [
+            f"- ({n.created_at.strftime('%H:%M')}) {n.content.strip()}" for n in notes
+        ]
+        return "\n".join(lines)
+
+    async def _augment_prompt(self, project_id: str, prompt: str) -> str:
+        """Append any unacked user notes to a raw user prompt (planner)."""
+        notes = await self._fetch_pending_notes(project_id)
+        formatted = self._format_notes(notes)
+        if not formatted:
+            return prompt
+        await self._ack_notes(notes)
+        return (
+            f"{prompt}\n\n"
+            "Additional notes from the user (posted after the initial "
+            "prompt — follow them strictly):\n"
+            f"{formatted}\n"
+        )
+
+    async def _inject_user_notes(
+        self, project_id: str, plan: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Attach unacked notes to the plan dict under ``_user_notes`` so any
+        agent that serialises the plan in its prompt picks them up."""
+        notes = await self._fetch_pending_notes(project_id)
+        formatted = self._format_notes(notes)
+        if not formatted:
+            return plan
+        await self._ack_notes(notes)
+        plan = dict(plan)
+        plan["_user_notes"] = formatted
+        return plan
 
     # ---------------------------------------------------------- persistence
 

@@ -116,6 +116,24 @@ class ProjectFile(Base):
     project: Mapped[Project] = relationship(back_populates="files")
 
 
+class ProjectNote(Base):
+    """A note posted by the user while the project is running.
+
+    Notes are injected into the agents' prompts on their next iteration so
+    the user can nudge the pipeline mid-flight ("use tailwind", "don't use
+    pydantic", "the last fix was wrong, revert it") without deleting and
+    restarting the project.
+    """
+
+    __tablename__ = "project_notes"
+
+    id: Mapped[str] = mapped_column(String(32), primary_key=True, default=_uid)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id", ondelete="CASCADE"))
+    content: Mapped[str] = mapped_column(Text)
+    acknowledged: Mapped[bool] = mapped_column(Integer, default=0)
+    created_at: Mapped[dt.datetime] = mapped_column(DateTime(timezone=True), default=_now)
+
+
 class Event(Base):
     """A stream of log lines / state transitions displayed in the UI."""
 

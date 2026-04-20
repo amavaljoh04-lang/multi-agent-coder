@@ -37,6 +37,9 @@ Rules:
 - No prose outside fenced blocks.
 - No "..." or "TODO". Code must be complete and runnable.
 - Respect imports / interfaces declared elsewhere in the project.
+- If the plan JSON contains a `_user_notes` field, these are instructions
+  the user added AFTER the initial prompt. Treat them as strict overrides
+  — they win over any conflicting choice from the original plan.
 """
 
 FIX_PROMPT = """\
@@ -87,6 +90,9 @@ ABSOLUTE RULES (violate any of these and the fix is wrong):
 7. Do NOT delete tests to make them pass. If a test is wrong, say so in a
    comment, but prefer fixing the code it tests.
 8. No prose outside fenced blocks. Complete files only, not diffs.
+9. If the plan JSON contains a `_user_notes` field, these are corrections
+   or constraints the user added while the project was running. Respect
+   them — if they contradict an older choice, apply the user's direction.
 """
 
 
