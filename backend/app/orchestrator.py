@@ -31,8 +31,8 @@ import logging
 import re
 import shutil
 import zipfile
-from pathlib import Path
 from collections.abc import Iterable
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import select
