@@ -48,6 +48,55 @@ from .sandbox import RunResult, Sandbox
 log = logging.getLogger(__name__)
 
 
+def _infer_install_command(install_cmd: str, test_cmd: str, workspace: Path) -> str:
+    """Return a shell command that prepares the sandbox before running tests.
+
+    The LLM-produced plan is not always trustworthy: small 7B planners
+    sometimes lose ``install_command`` between prompt and JSON, even when
+    the user spelled it out verbatim. Rather than punish the run with an
+    ``exit 127 pytest: not found`` and then send the Fixer off to patch
+    nothing (because the problem is not in the files), backfill the
+    obvious cases here:
+
+    * Always prepend ``pip install -r requirements.txt`` when the file
+      exists and is non-empty (ignoring pure-comment lines).
+    * Always ensure ``pytest`` is installed when ``test_cmd`` mentions
+      pytest and the resolved install command doesn't already pull it in.
+
+    The caller-provided ``install_cmd`` is preserved verbatim and joined
+    last, so a project with an explicit ``install_command`` still runs it
+    exactly as written.
+    """
+    parts: list[str] = []
+    req = workspace / "requirements.txt"
+    req_has_pytest = False
+    if req.exists():
+        try:
+            content = req.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            content = ""
+        non_comment = [
+            line.strip() for line in content.splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        ]
+        if non_comment:
+            parts.append("pip install --quiet --no-input -r requirements.txt")
+            req_has_pytest = any(
+                line.split("==")[0].split(">=")[0].split("<=")[0].strip().lower() == "pytest"
+                for line in non_comment
+            )
+    needs_pytest = (
+        "pytest" in test_cmd
+        and "pytest" not in install_cmd
+        and not req_has_pytest
+    )
+    if needs_pytest:
+        parts.append("pip install --quiet --no-input pytest")
+    if install_cmd:
+        parts.append(install_cmd)
+    return " && ".join(parts)
+
+
 class Orchestrator:
     def __init__(self) -> None:
         self.cfg = get_config()
@@ -620,8 +669,16 @@ class Orchestrator:
             )
 
             script_parts: list[str] = []
-            if install_cmd:
-                script_parts.append(install_cmd)
+            # Planners sometimes drop ``install_command`` from the plan even
+            # when the user spelled it out (small 7B models aren't always
+            # faithful JSON-copyists). Backfill the obvious cases so the
+            # sandbox doesn't blow up with exit 127 "pytest: not found" and
+            # send the Fixer on a wild goose chase.
+            effective_install = _infer_install_command(
+                install_cmd, test_cmd, workspace,
+            )
+            if effective_install:
+                script_parts.append(effective_install)
             script_parts.append(test_cmd)
             script = " && ".join(script_parts)
 
