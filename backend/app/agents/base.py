@@ -70,8 +70,12 @@ def extract_code_blocks(text: str) -> dict[str, str]:
 
 PLAN_SYSTEM = (
     "You are a senior software architect. "
-    "You decompose user project requests into a concrete, minimal set of files "
-    "and atomic implementation tasks. "
+    "You decompose user project requests into a concrete set of files and "
+    "atomic implementation tasks that together deliver EVERY requirement the "
+    "user listed — not a minimal MVP, not a subset. "
+    "If the user enumerates features, flags, fields, or subcommands, each one "
+    "MUST be covered by at least one task. Under-specifying the plan forces "
+    "the pipeline to ship a half-finished project. "
     "Output ONLY valid JSON, no prose, no markdown, no <think> blocks leaking."
 )
 

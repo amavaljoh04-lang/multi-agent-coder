@@ -55,7 +55,7 @@ roles:
       - { server: gpu3070, model: "qwen2.5-coder:1.5b" }
     temperature: 0.2
     num_ctx: 16384
-    num_predict: 8192
+    num_predict: 12288
     idle_timeout_seconds: 180.0
     call_timeout_seconds: 1800.0
 

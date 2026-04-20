@@ -13,6 +13,15 @@ User project request:
 {prompt}
 ---
 
+STEP 0 (internal — do NOT include in output, but DO use to drive the plan):
+Read the user request above and make a mental checklist of EVERY explicit
+requirement. Break each sentence apart. Every feature, every subcommand,
+every CLI flag (e.g. --store, --format, --json), every data field
+(e.g. id, status, created_at), every file requested (README, tests,
+requirements.txt), every behavior (ANSI colors, JSON persistence,
+tmp_path isolation in tests) is a separate requirement. Do NOT merge
+multiple requirements into one task.
+
 Produce a JSON object with this exact schema:
 
 {{
@@ -22,6 +31,12 @@ Produce a JSON object with this exact schema:
   "run_command": "shell command to run the app or main script",
   "test_command": "shell command to run the tests (pytest, npm test, ...)",
   "install_command": "shell command to install deps (pip install -r requirements.txt, npm ci, ...)",
+  "requirements_coverage": [
+     {{
+       "requirement": "verbatim quote or close paraphrase of a single user-stated requirement",
+       "covered_by_task_ids": ["t3", "t7"]
+     }}
+  ],
   "files": [
      {{"path": "relative/path.ext", "purpose": "what this file does"}}
   ],
@@ -37,6 +52,17 @@ Produce a JSON object with this exact schema:
 }}
 
 Rules:
+- "requirements_coverage" MUST enumerate EVERY distinct requirement in the
+  user prompt and map each to the task(s) that implement it. No requirement
+  may be left uncovered. If the user listed 5 subcommands, you have at
+  least 5 entries here. If the user listed a flag, it is its own entry.
+  Producing fewer entries than there are requirements in the prompt is
+  treated as a planning failure by the pipeline.
+- Do NOT under-specify. If the user wrote "subcommands add, list, done, rm,
+  clear", ALL FIVE must appear in tasks and coverage — not a subset.
+- Copy "install_command" VERBATIM from the user prompt when the user
+  specified one (e.g. "install_command: pip install pytest"). Do NOT
+  drop it, do NOT leave it empty when the user wrote one.
 - "files" MUST list EVERY file that the final project will contain, WITH NO
   EXCEPTION. This includes: source files, test files, requirements.txt /
   pyproject.toml / package.json, README.md, __init__.py for any package

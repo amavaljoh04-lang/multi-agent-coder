@@ -254,6 +254,7 @@ class Orchestrator:
                 planner_prompt,
                 stream_callback=self._streamer(project_id, "planner"),
             )
+            await self._emit_planner_coverage(project_id, plan)
             await self._save_plan(project_id, plan)
             await self._sync_tasks(project_id, plan)
 
@@ -1141,6 +1142,56 @@ class Orchestrator:
 
     async def _save_plan(self, project_id: str, plan: dict[str, Any]) -> None:
         await self._update(project_id, architecture=plan)
+
+    async def _emit_planner_coverage(
+        self, project_id: str, plan: dict[str, Any]
+    ) -> None:
+        """Surface ``requirements_coverage`` as a user-visible event.
+
+        The planner is asked (in ``PLAN_PROMPT``) to enumerate each distinct
+        user requirement and the task(s) implementing it. Logging this
+        explicitly serves two purposes:
+
+        * The user sees exactly what the planner understood from their
+          prompt, so a weak planner that dropped a subcommand / a flag /
+          a data field is obvious at a glance — they can stop the run
+          early instead of waiting 30 min for a half-finished ZIP.
+        * It creates a paper trail (in ``events``) that we can later use
+          to correlate planner quality with model size / prompt style.
+        """
+        coverage = plan.get("requirements_coverage")
+        tasks = plan.get("tasks") or []
+        files = plan.get("files") or []
+        if not isinstance(coverage, list) or not coverage:
+            await self.emit(
+                project_id, "warning", "planner",
+                (
+                    f"Planner produced no requirements_coverage field. "
+                    f"{len(tasks)} tasks / {len(files)} files — "
+                    f"the project may be under-specified relative to the prompt."
+                ),
+            )
+            return
+        lines = [
+            f"Planner extracted {len(coverage)} requirement(s) "
+            f"→ {len(tasks)} tasks / {len(files)} files:"
+        ]
+        for entry in coverage[:50]:
+            if not isinstance(entry, dict):
+                continue
+            req = str(entry.get("requirement", "")).strip()
+            ids = entry.get("covered_by_task_ids") or []
+            ids_str = (
+                ", ".join(str(i) for i in ids) or "(none)"
+                if isinstance(ids, list)
+                else str(ids)
+            )
+            if req:
+                lines.append(f"  • {req[:140]} → {ids_str}")
+        await self.emit(
+            project_id, "info", "planner", "\n".join(lines),
+            data={"requirements_coverage": coverage},
+        )
 
     async def _sync_tasks(self, project_id: str, plan: dict[str, Any]) -> None:
         tasks = plan.get("tasks") or []
