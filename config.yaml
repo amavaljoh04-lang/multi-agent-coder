@@ -101,8 +101,10 @@ orchestrator:
   # Max number of test/fix iterations per project (-1 = unlimited, bounded
   # only by max_wall_seconds and the internal hard-cap in the test/fix loop).
   max_iterations: -1
-  # Max retries when a file fails review before escalating back to the planner.
-  max_review_retries: 5
+  # Max retries when a file fails review before force-approving and moving
+  # on. Kept tight because the TESTING phase is the real judge — we don't
+  # want to burn 5 reviewer round-trips on subjective style feedback.
+  max_review_retries: 3
   # Seconds between heartbeats (used to detect stalled background jobs).
   heartbeat_interval: 30
   # Sandbox type: "docker" (isolated) or "local" (no isolation, dangerous).

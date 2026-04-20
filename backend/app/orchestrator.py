@@ -32,6 +32,7 @@ import re
 import shutil
 import zipfile
 from pathlib import Path
+from collections.abc import Iterable
 from typing import Any
 
 from sqlalchemy import select
@@ -425,6 +426,23 @@ class Orchestrator:
                     project_id, "warning", "reviewer",
                     f"[{task.title}] force-approved after static-check loop",
                 )
+            return
+
+        # Static check passed. For test-only tasks we trust the static check
+        # (compile + ruff runtime rules) and skip the LLM reviewer entirely:
+        # tests that import cleanly and parse are good enough, the real
+        # judgement comes from actually running them in the TESTING phase.
+        if _is_tests_only(blocks.keys()):
+            for _rpath in blocks:
+                await self.emit(
+                    project_id, "file_review_end", "reviewer", _rpath,
+                    data={"path": _rpath, "approved": True},
+                )
+            await self._set_task_status(task.id, TaskStatus.DONE)
+            await self.emit(
+                project_id, "agent", "reviewer",
+                f"[{task.title}] approved (tests — static check only)",
+            )
             return
 
         await self.emit(project_id, "agent", "reviewer", f"[{task.title}] reviewing...")
@@ -1241,7 +1259,19 @@ class Orchestrator:
                 return
             t.attempts = (t.attempts or 0) + 1
             if review_notes:
-                t.review_notes = review_notes
+                # Accumulate rejection history so the Coder on attempt N
+                # sees exactly what was already tried and rejected on
+                # attempts 1..N-1. Without this the Coder keeps remaking
+                # the same mistake because it has no memory.
+                header = f"=== Attempt #{t.attempts} — rejected ==="
+                prev = (t.review_notes or "").strip()
+                combined = (
+                    f"{prev}\n\n{header}\n{review_notes}"
+                    if prev
+                    else f"{header}\n{review_notes}"
+                )
+                # Cap to avoid runaway context growth.
+                t.review_notes = combined[-20000:]
                 t.status = TaskStatus.PENDING
             if error:
                 t.last_error = error
@@ -1322,6 +1352,27 @@ def _safe_relpath(raw: str) -> str | None:
     if not p or ".." in Path(p).parts:
         return None
     return p
+
+
+def _is_tests_only(paths: Iterable[str]) -> bool:
+    """True when every path in the iterable looks like a test file.
+
+    Used to skip the LLM Reviewer for tests: once they parse, import and
+    satisfy our runtime-only ruff rules, the real verdict comes from
+    actually running them in the TESTING phase.
+    """
+    paths = list(paths)
+    if not paths:
+        return False
+    for p in paths:
+        parts = Path(p).parts
+        name = Path(p).name
+        in_tests_dir = any(part in {"tests", "test"} for part in parts)
+        is_test_file = name.startswith("test_") or name.endswith("_test.py")
+        is_init = name == "__init__.py" and in_tests_dir
+        if not (in_tests_dir or is_test_file or is_init):
+            return False
+    return True
 
 
 _orch: Orchestrator | None = None

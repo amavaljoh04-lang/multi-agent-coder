@@ -40,6 +40,13 @@ Rules:
 - If the plan JSON contains a `_user_notes` field, these are instructions
   the user added AFTER the initial prompt. Treat them as strict overrides
   — they win over any conflicting choice from the original plan.
+- If the "Reviewer asked for these changes" block contains multiple
+  "=== Attempt #N — rejected ===" sections, that is the HISTORY of
+  previous attempts on this same task. You have already tried those
+  approaches and they were rejected. DO NOT repeat the same mistakes.
+  If every past attempt was rejected for conflicting reasons, trust the
+  MOST RECENT feedback and keep the parts of your earlier code that were
+  not criticised.
 """
 
 FIX_PROMPT = """\
