@@ -231,6 +231,14 @@ class Orchestrator:
         # 5. TEST / FIX loop until passing
         await self._test_fix_loop(project_id, plan, workspace, stop)
 
+        # If the test/fix loop bailed out with FAILED (hard cap, no-progress
+        # gate, max_iterations), do NOT proceed to packaging. Packaging a
+        # broken project and marking it COMPLETED is precisely how the old
+        # "fake success" bug hid real failures from the user.
+        project_after = await self._get_project(project_id)
+        if project_after is not None and project_after.status == ProjectStatus.FAILED:
+            return
+
         # 6. PACKAGING
         await self._set_status(project_id, ProjectStatus.PACKAGING)
         zip_path = await self._package(project_id, workspace)
