@@ -36,6 +36,14 @@ class RoleConfig(BaseModel):
     # upper bound for single-file generation; the orchestrator clamps
     # total usage via num_ctx and per-role timeouts.
     num_predict: int = 4096
+    # Watchdog: if Ollama produces no streaming token for this many seconds,
+    # abort the request and fall back to the next candidate. Prevents a stuck
+    # model (e.g. paged to disk, wrong quantisation, CPU offload stalled) from
+    # hanging the pipeline silently for 30+ minutes.
+    idle_timeout_seconds: float = 120.0
+    # Absolute per-call wall-clock timeout. Even a healthy large model should
+    # not spend more than this on a single response. -1 = unlimited.
+    call_timeout_seconds: float = 1800.0
 
     def candidates(self) -> list[ModelPick]:
         return [self.primary, *self.fallbacks]

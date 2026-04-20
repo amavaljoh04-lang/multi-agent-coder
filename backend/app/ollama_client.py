@@ -129,6 +129,8 @@ class OllamaRouter:
                     temperature=temperature if temperature is not None else rc.temperature,
                     num_ctx=num_ctx if num_ctx is not None else rc.num_ctx,
                     num_predict=num_predict if num_predict is not None else rc.num_predict,
+                    idle_timeout=rc.idle_timeout_seconds,
+                    call_timeout=rc.call_timeout_seconds,
                     stream_callback=stream_callback,
                 )
             except Exception as exc:
@@ -151,6 +153,8 @@ class OllamaRouter:
         temperature: float,
         num_ctx: int,
         num_predict: int,
+        idle_timeout: float,
+        call_timeout: float,
         stream_callback: Any | None,
     ) -> str:
         body: dict[str, Any] = {
@@ -172,7 +176,25 @@ class OllamaRouter:
                 acc: list[str] = []
                 async with handle.client.stream("POST", "/api/chat", json=body) as resp:
                     resp.raise_for_status()
-                    async for line in resp.aiter_lines():
+                    iterator = resp.aiter_lines().__aiter__()
+                    while True:
+                        # Watchdog: refuse to wait more than ``idle_timeout``
+                        # between two tokens. A stuck / paged-out model on
+                        # a busy GPU typically drops to <0.1 tok/s or stops
+                        # entirely; this lets us fall back to the next
+                        # candidate instead of hanging silently.
+                        try:
+                            line = await asyncio.wait_for(
+                                iterator.__anext__(), timeout=idle_timeout
+                            )
+                        except StopAsyncIteration:
+                            break
+                        except TimeoutError as exc:
+                            raise OllamaError(
+                                f"idle timeout ({idle_timeout:.0f}s) on "
+                                f"{handle.name}/{pick.model}: model produced "
+                                f"no token for too long"
+                            ) from exc
                         if not line:
                             continue
                         try:
@@ -196,6 +218,17 @@ class OllamaRouter:
                             break
                 return "".join(acc)
 
+        async def _attempt_with_wall_timeout() -> str:
+            if call_timeout and call_timeout > 0:
+                try:
+                    return await asyncio.wait_for(_attempt(), timeout=call_timeout)
+                except TimeoutError as exc:
+                    raise OllamaError(
+                        f"call timeout ({call_timeout:.0f}s) on "
+                        f"{handle.name}/{pick.model}"
+                    ) from exc
+            return await _attempt()
+
         try:
             async for attempt in AsyncRetrying(
                 reraise=True,
@@ -204,7 +237,7 @@ class OllamaRouter:
                 retry=retry_if_exception_type((httpx.TransportError, httpx.HTTPStatusError)),
             ):
                 with attempt:
-                    return await _attempt()
+                    return await _attempt_with_wall_timeout()
         except RetryError as exc:
             raise OllamaError(f"retries exhausted on {handle.name}/{pick.model}") from exc
         raise OllamaError("unreachable")  # pragma: no cover
