@@ -1,0 +1,164 @@
+# Multi-Agent Coder — configuration
+#
+# Hardware inventory (from `ollama list` on each box + `nvidia-smi`):
+#
+#   gpu5070 (RTX 5070, 12 GB VRAM) @ 192.168.0.224
+#     * qwen2.5-coder:32b            — 20 GB Q4 (partial CPU offload ~8 GB)
+#     * qwen2.5-coder:14b            —  9 GB Q4 (fits entirely in VRAM)
+#     * deepseek-coder:33b           — 19 GB Q4 (partial offload)
+#     * deepseek-r1:14b              —  9 GB Q4 (fits)
+#     * deepseek-coder-v2:latest     — 15.7B MoE, 9 GB Q4 (fits, weak patcher)
+#     * qwen2.5-coder:7b             —  4.7 GB (fast fallback)
+#
+#   gpu4060 (RTX 4060, 8 GB VRAM) @ 192.168.0.203
+#     * qwen3.6:latest               — 27 GB 36B MoE  (DO NOT USE — 70% CPU offload, ~1 tok/s)
+#     * qwen2.5-coder:7b             —  4.7 GB (fits entirely, ~30 tok/s)
+#     * qwen2.5:7b-instruct-q4_K_M   —  4.7 GB (fits)
+#     * deepseek-coder:6.7b          —  3.8 GB (fits)
+#     * mistral:latest               —  4.4 GB
+#
+#   gpu3070 (RTX 3070, 8 GB VRAM) @ 192.168.0.249
+#     * gemma4:latest                —  9.6 GB (slight overflow)
+#     * qwen2.5-coder:1.5b           —  1.0 GB (too small for real reasoning)
+#     * deepseek-coder:6.7b          —  3.8 GB (fits)
+#     * mistral:latest               —  4.4 GB
+#
+# Strategy: pin the best-possible model that FITS in each GPU's VRAM so we
+# never see "model paged to disk, 0.5 tok/s" again. Coder/Fixer get the
+# smartest model we have (qwen2.5-coder:32b on 5070) because that's the
+# bottleneck of correctness. Planner/Architect and Reviewer/Analyst run on
+# 4060 and 3070 with a fully-in-VRAM 7B — we trade raw IQ for 30× speed
+# and the ability to run planner + reviewer concurrently.
+
+servers:
+  gpu5070:
+    url: "http://192.168.0.224:11434"
+    label: "RTX 5070 (12 Go)"
+    concurrency: 2
+  gpu4060:
+    url: "http://192.168.0.203:11434"
+    label: "RTX 4060 (8 Go)"
+    concurrency: 2
+  gpu3070:
+    url: "http://192.168.0.249:11434"
+    label: "RTX 3070 (8 Go)"
+    concurrency: 2
+
+roles:
+  # Splits the project into atomic tasks, produces the plan. 7B on 4060
+  # fits entirely in VRAM so planning finishes in 30-90 s instead of the
+  # 30-60 min we saw with qwen3.6 36B.
+  planner:
+    primary: { server: gpu4060, model: "qwen2.5-coder:7b" }
+    fallbacks:
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+      - { server: gpu3070, model: "qwen2.5-coder:1.5b" }
+    temperature: 0.2
+    num_ctx: 16384
+    num_predict: 12288
+    idle_timeout_seconds: 180.0
+    call_timeout_seconds: 1800.0
+
+  # High-level architecture: file tree, specs, interfaces.
+  architect:
+    primary: { server: gpu4060, model: "qwen2.5-coder:7b" }
+    fallbacks:
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+      - { server: gpu3070, model: "deepseek-coder:6.7b" }
+    temperature: 0.3
+    num_ctx: 16384
+    num_predict: 8192
+    idle_timeout_seconds: 180.0
+    call_timeout_seconds: 1800.0
+
+  # Main code writer. The smartest open-source coder at the time of
+  # writing. 32B Q4 at partial offload on a 12 GB card runs ~4-8 tok/s;
+  # slow but the quality gain vs 14B is worth it for real projects.
+  coder:
+    primary: { server: gpu5070, model: "qwen2.5-coder:32b" }
+    fallbacks:
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+      - { server: gpu5070, model: "deepseek-coder-v2:latest" }
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
+    temperature: 0.15
+    num_ctx: 16384
+    num_predict: 8192
+    idle_timeout_seconds: 240.0
+    call_timeout_seconds: 3600.0
+
+  # Reviews code written by the coder. 7B on 3070 runs in parallel with
+  # the planner on the 4060 — no GPU contention.
+  reviewer:
+    primary: { server: gpu3070, model: "deepseek-coder:6.7b" }
+    fallbacks:
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+    temperature: 0.1
+    num_ctx: 12288
+    num_predict: 4096
+    idle_timeout_seconds: 120.0
+    call_timeout_seconds: 900.0
+
+  # Analyses test failures / stack traces and proposes a fix plan.
+  tester_analyst:
+    primary: { server: gpu3070, model: "deepseek-coder:6.7b" }
+    fallbacks:
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+    temperature: 0.1
+    num_ctx: 12288
+    num_predict: 4096
+    idle_timeout_seconds: 120.0
+    call_timeout_seconds: 900.0
+
+  # Dedicated fixer: applies the smallest possible patch given an analyst
+  # report or an in-loop static-check error. Same base as the coder to
+  # reuse the loaded weights on the 5070 (Ollama keeps a single model in
+  # VRAM for 30 min via keep_alive).
+  fixer:
+    primary: { server: gpu5070, model: "qwen2.5-coder:32b" }
+    fallbacks:
+      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+      - { server: gpu5070, model: "deepseek-coder-v2:latest" }
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
+    temperature: 0.0
+    num_ctx: 16384
+    num_predict: 8192
+    idle_timeout_seconds: 240.0
+    call_timeout_seconds: 3600.0
+
+  # Cheap dispatcher / classification tasks.
+  dispatcher:
+    primary: { server: gpu4060, model: "qwen2.5-coder:7b" }
+    fallbacks:
+      - { server: gpu4060, model: "qwen2.5:7b-instruct-q4_K_M" }
+      - { server: gpu3070, model: "deepseek-coder:6.7b" }
+    temperature: 0.0
+    num_ctx: 4096
+    num_predict: 1024
+    idle_timeout_seconds: 60.0
+    call_timeout_seconds: 300.0
+
+orchestrator:
+  # Max number of test/fix iterations per project (-1 = unlimited, bounded
+  # only by max_wall_seconds and the internal hard-cap in the test/fix loop).
+  max_iterations: -1
+  # Max retries when a file fails review before force-approving and moving
+  # on. Kept tight because the TESTING phase is the real judge — we don't
+  # want to burn 5 reviewer round-trips on subjective style feedback.
+  max_review_retries: 3
+  # Seconds between heartbeats (used to detect stalled background jobs).
+  heartbeat_interval: 30
+  # Sandbox type: "docker" (isolated) or "local" (no isolation, dangerous).
+  sandbox: "docker"
+  # Docker image used for the sandbox.
+  sandbox_image: "python:3.12-slim"
+  # Hard timeout for a single test run inside the sandbox (seconds).
+  sandbox_timeout: 600
+  # How many coder tasks may run concurrently. 1 = sequential (safest, one
+  # strong model gets full VRAM). Bump to 2 if you want to trade a bit of
+  # quality for parallelism.
+  parallel_coders: 1
+  # Absolute wall-clock budget per project, in seconds. -1 = unlimited.
+  # Typical values: 3600 = 1h, 86400 = 1 day, 604800 = 1 week.
+  max_wall_seconds: -1
