@@ -43,7 +43,7 @@ from .database import SessionLocal
 from .events import bus
 from .models import Event, Project, ProjectFile, ProjectNote, ProjectStatus, Task, TaskStatus, TestRun
 from .ollama_client import OllamaRouter, get_router
-from .sandbox import Sandbox
+from .sandbox import RunResult, Sandbox
 
 log = logging.getLogger(__name__)
 
@@ -620,17 +620,44 @@ class Orchestrator:
             result = await self.sandbox.run(workspace, script)
             await self._record_test(project_id, iteration, script, result)
 
-            # pytest exit code 5 means "no tests collected". For our purposes
-            # that is not a failure — it means the project has no tests yet
-            # (or the test_command was a bare-import sanity check that ran
-            # clean). Treat it as PASS so we can package and deliver.
+            # pytest exit code 5 means "no tests collected". Treat this as a
+            # PASS ONLY when the project genuinely has no test files — i.e.
+            # the test_command was a bare-import sanity check or the project
+            # is a tiny script with no tests planned. If test files exist
+            # and pytest still collects zero, something is broken (typically
+            # the Fixer deleted every ``def test_`` to "fix" a failure). In
+            # that case we treat it as a real failure so the test authors
+            # don't get rewarded for destroying the suite.
+            has_test_files = _workspace_has_test_files(workspace)
             noop_pass = (
                 result.exit_code == 5
                 and "pytest" in script
                 and ("no tests ran" in (result.stdout or "").lower()
                      or "no tests ran" in (result.stderr or "").lower()
                      or "collected 0 items" in (result.stdout or "").lower())
+                and not has_test_files
             )
+            if (
+                result.exit_code == 5
+                and "pytest" in script
+                and has_test_files
+            ):
+                # Force this to look like a real failure for the rest of the
+                # loop so the Fixer sees a clear signal. We inject a short
+                # stderr line explaining the regression.
+                regression_msg = (
+                    "ERROR: pytest collected 0 tests but test files exist in "
+                    "the workspace. The Fixer likely removed test functions. "
+                    "Restore `def test_*` definitions — do NOT delete tests "
+                    "to make them pass."
+                )
+                result = RunResult(
+                    exit_code=1,
+                    stdout=result.stdout,
+                    stderr=(result.stderr or "") + "\n\n" + regression_msg,
+                )
+                await self._record_test(project_id, iteration, script, result)
+
             if result.exit_code == 0 or noop_pass:
                 msg = (
                     f"Iteration {iteration}: PASSED"
@@ -684,6 +711,20 @@ class Orchestrator:
                     existing_files=files_before,
                     stream_callback=self._coder_streamer(project_id, "fixer"),
                 )
+                # Anti-cheat: if the Fixer tries to "fix" a test file by
+                # removing test functions, drop that block and warn the
+                # user loudly. Tests can be fixed, not deleted.
+                fix_blocks, rejected = _reject_test_deletions(
+                    fix_blocks, files_before,
+                )
+                for rej_path, rej_before, rej_after in rejected:
+                    await self.emit(
+                        project_id, "warning", "fixer",
+                        f"Iteration {iteration}: refused fixer patch for "
+                        f"{rej_path} — test count would drop from "
+                        f"{rej_before} to {rej_after}. Keeping previous "
+                        f"version.",
+                    )
                 await self._write_files(project_id, workspace, fix_blocks)
                 await self.emit(
                     project_id, "agent", "coder",
@@ -1373,6 +1414,74 @@ def _is_tests_only(paths: Iterable[str]) -> bool:
         if not (in_tests_dir or is_test_file or is_init):
             return False
     return True
+
+
+def _count_test_functions(source: str) -> int:
+    """Count top-level ``def test_*`` declarations in a Python source.
+
+    Used to prevent the Fixer from silently dropping tests in order to
+    make pytest collect zero items and pass the exit-5 rule.
+    """
+    count = 0
+    for line in source.splitlines():
+        stripped = line.lstrip()
+        if stripped.startswith("def test_") or stripped.startswith("async def test_"):
+            count += 1
+    return count
+
+
+def _reject_test_deletions(
+    fix_blocks: dict[str, str],
+    files_before: dict[str, str],
+) -> tuple[dict[str, str], list[tuple[str, int, int]]]:
+    """Filter out fixer patches that shrink a test file's test count.
+
+    Returns ``(filtered_blocks, rejected_list)`` where rejected_list is
+    a list of ``(path, before_count, after_count)`` tuples that the
+    caller should surface to the UI. A patch is rejected when, for a
+    test file, the new content contains fewer ``def test_*`` than the
+    previous version on disk.
+    """
+    filtered: dict[str, str] = {}
+    rejected: list[tuple[str, int, int]] = []
+    for path, new_content in fix_blocks.items():
+        name = Path(path).name
+        parts = Path(path).parts
+        is_test = (
+            name.startswith("test_")
+            or name.endswith("_test.py")
+            or any(part in {"tests", "test"} for part in parts)
+        )
+        if is_test:
+            before = _count_test_functions(files_before.get(path, ""))
+            after = _count_test_functions(new_content)
+            if before > 0 and after < before:
+                rejected.append((path, before, after))
+                continue
+        filtered[path] = new_content
+    return filtered, rejected
+
+
+def _workspace_has_test_files(workspace: Path) -> bool:
+    """True when any ``test_*.py`` or ``tests/`` file exists in the tree.
+
+    Used as an anti-cheat for pytest exit code 5: if tests were planned
+    and the fixer later produces zero collected tests, that is a
+    regression (the Fixer deleted test functions) and must be treated as
+    a real failure, not a pass.
+    """
+    if not workspace.exists():
+        return False
+    for p in workspace.rglob("*.py"):
+        if not p.is_file():
+            continue
+        name = p.name
+        parts = p.relative_to(workspace).parts
+        in_tests_dir = any(part in {"tests", "test"} for part in parts)
+        is_test_file = name.startswith("test_") or name.endswith("_test.py")
+        if in_tests_dir or is_test_file:
+            return True
+    return False
 
 
 _orch: Orchestrator | None = None
