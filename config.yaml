@@ -1,9 +1,20 @@
 # Multi-Agent Coder — configuration
 #
-# Strict model list: we only keep models proven to produce working code on
-# this hardware. Small (< 14B) models and cloud models have been removed so
-# the pipeline never silently falls back to a weak model that produces
-# broken output.
+# Models available on the user's hardware (from `ollama list`):
+#
+#   gpu5070 (RTX 5070):
+#     * deepseek-coder-v2:latest — 16B MoE, strong coder, ~9 GB Q4
+#
+#   gpu4060 (RTX 4060):
+#     * qwen3.6:latest                — 23 GB custom Qwen3-based build
+#     * mistral:latest                — 4.4 GB
+#     * deepseek-coder:6.7b           — 3.8 GB
+#     * qwen2.5-coder:7b              — 4.7 GB
+#     * qwen2.5:7b-instruct-q4_K_M    — 4.7 GB
+#
+# Primary strategy: deepseek-coder-v2 on the 5070 writes + fixes code,
+# qwen3.6:latest on the 4060 does reasoning (planner / architect /
+# reviewer / analyst). Smaller models are emergency fallbacks only.
 
 servers:
   gpu5070:
@@ -19,88 +30,76 @@ servers:
     label: "RTX 3070"
     concurrency: 2
 
-# Coding-capable models used in the whole pipeline:
-#   * qwen2.5-coder:32b   — primary for code + fix work (state-of-the-art
-#                           open-source coder as of late 2025, ~20 GB Q4,
-#                           small CPU offload on a 12 GB GPU, very usable)
-#   * deepseek-coder:33b  — secondary fallback for code + fix
-#   * qwen2.5-coder:14b   — lightweight fallback (tight VRAM situations)
-#   * deepseek-r1:14b     — reasoning (planner / architect / reviewer / analyst)
-# If none of these are reachable, the pipeline fails fast rather than
-# silently demoting to a weak model that produces broken output.
 roles:
   # Splits the project into atomic tasks, produces the plan.
   planner:
-    primary: { server: gpu5070, model: "deepseek-r1:14b" }
+    primary: { server: gpu4060, model: "qwen3.6:latest" }
     fallbacks:
-      - { server: gpu5070, model: "deepseek-coder:33b" }
-      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+      - { server: gpu5070, model: "deepseek-coder-v2:latest" }
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
     temperature: 0.2
     num_ctx: 16384
 
   # High-level architecture: file tree, specs, interfaces.
   architect:
-    primary: { server: gpu5070, model: "deepseek-r1:14b" }
+    primary: { server: gpu4060, model: "qwen3.6:latest" }
     fallbacks:
-      - { server: gpu5070, model: "deepseek-coder:33b" }
-      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+      - { server: gpu5070, model: "deepseek-coder-v2:latest" }
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
     temperature: 0.3
     num_ctx: 16384
 
   # Main code writer.
   coder:
-    primary: { server: gpu5070, model: "qwen2.5-coder:32b" }
+    primary: { server: gpu5070, model: "deepseek-coder-v2:latest" }
     fallbacks:
-      - { server: gpu5070, model: "deepseek-coder:33b" }
-      - { server: gpu5070, model: "qwen2.5-coder:14b" }
-      - { server: gpu4060, model: "qwen2.5-coder:14b" }
+      - { server: gpu4060, model: "qwen3.6:latest" }
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
+      - { server: gpu4060, model: "deepseek-coder:6.7b" }
     temperature: 0.15
     num_ctx: 16384
 
-  # Reviews code written by the coder (different base model for diversity).
+  # Reviews code written by the coder (different base for diversity).
   reviewer:
-    primary: { server: gpu5070, model: "deepseek-r1:14b" }
+    primary: { server: gpu4060, model: "qwen3.6:latest" }
     fallbacks:
-      - { server: gpu5070, model: "deepseek-coder:33b" }
-      - { server: gpu4060, model: "qwen2.5-coder:14b" }
+      - { server: gpu5070, model: "deepseek-coder-v2:latest" }
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
     temperature: 0.1
     num_ctx: 16384
 
   # Analyses test failures / stack traces and proposes a fix plan.
   tester_analyst:
-    primary: { server: gpu5070, model: "deepseek-r1:14b" }
+    primary: { server: gpu4060, model: "qwen3.6:latest" }
     fallbacks:
-      - { server: gpu5070, model: "deepseek-coder:33b" }
-      - { server: gpu4060, model: "qwen2.5-coder:14b" }
+      - { server: gpu5070, model: "deepseek-coder-v2:latest" }
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
     temperature: 0.1
     num_ctx: 12288
 
   # Dedicated fixer: applies the smallest possible patch given an analyst
-  # report or an in-loop static-check error. Separated from `coder` so we
-  # can use temperature 0 and a stricter prompt — the coder writes new
-  # code, the fixer edits existing code without rewriting it.
+  # report or an in-loop static-check error. Temperature 0, strict prompt.
   fixer:
-    primary: { server: gpu5070, model: "qwen2.5-coder:32b" }
+    primary: { server: gpu5070, model: "deepseek-coder-v2:latest" }
     fallbacks:
-      - { server: gpu5070, model: "deepseek-coder:33b" }
-      - { server: gpu5070, model: "qwen2.5-coder:14b" }
-      - { server: gpu4060, model: "qwen2.5-coder:14b" }
+      - { server: gpu4060, model: "qwen3.6:latest" }
+      - { server: gpu4060, model: "qwen2.5-coder:7b" }
+      - { server: gpu4060, model: "deepseek-coder:6.7b" }
     temperature: 0.0
     num_ctx: 16384
 
   # Cheap dispatcher / classification tasks.
-  # Uses qwen2.5-coder:14b too — we'd rather spend a few extra seconds than
-  # let a 1.5B model misclassify.
   dispatcher:
-    primary: { server: gpu4060, model: "qwen2.5-coder:14b" }
+    primary: { server: gpu4060, model: "qwen2.5-coder:7b" }
     fallbacks:
-      - { server: gpu5070, model: "qwen2.5-coder:14b" }
+      - { server: gpu4060, model: "qwen2.5:7b-instruct-q4_K_M" }
+      - { server: gpu4060, model: "mistral:latest" }
     temperature: 0.0
     num_ctx: 4096
 
 orchestrator:
   # Max number of test/fix iterations per project (-1 = unlimited, bounded
-  # only by max_wall_seconds).
+  # only by max_wall_seconds and the internal hard-cap in the test/fix loop).
   max_iterations: -1
   # Max retries when a file fails review before escalating back to the planner.
   max_review_retries: 5

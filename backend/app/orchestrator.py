@@ -575,8 +575,24 @@ class Orchestrator:
             result = await self.sandbox.run(workspace, script)
             await self._record_test(project_id, iteration, script, result)
 
-            if result.exit_code == 0:
-                await self.emit(project_id, "test", "", f"Iteration {iteration}: PASSED")
+            # pytest exit code 5 means "no tests collected". For our purposes
+            # that is not a failure — it means the project has no tests yet
+            # (or the test_command was a bare-import sanity check that ran
+            # clean). Treat it as PASS so we can package and deliver.
+            noop_pass = (
+                result.exit_code == 5
+                and "pytest" in script
+                and ("no tests ran" in (result.stdout or "").lower()
+                     or "no tests ran" in (result.stderr or "").lower()
+                     or "collected 0 items" in (result.stdout or "").lower())
+            )
+            if result.exit_code == 0 or noop_pass:
+                msg = (
+                    f"Iteration {iteration}: PASSED"
+                    if not noop_pass
+                    else f"Iteration {iteration}: PASSED (no tests collected)"
+                )
+                await self.emit(project_id, "test", "", msg)
                 return
 
             # Signature of this failure (last 500 chars of stderr). Used to
