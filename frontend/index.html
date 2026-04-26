@@ -9,26 +9,53 @@
   <body>
     <header class="topbar">
       <div class="brand">
-        <span class="brand-title">Multi-Agent Coder</span>
-        <span class="brand-sub">local autonomous pipeline</span>
+        <span class="brand-icon">&#x2726;</span>
+        <div>
+          <span class="brand-title">Multi-Agent Coder</span>
+          <span class="brand-sub">local autonomous pipeline</span>
+        </div>
       </div>
       <div id="servers" class="servers"></div>
-      <button id="btn-menu" class="btn-menu" aria-label="menu">☰</button>
+      <button id="btn-menu" class="btn-menu" aria-label="menu">&#9776;</button>
     </header>
 
     <main class="shell">
       <aside class="sidebar" id="sidebar">
-        <section class="card">
-          <header class="card-head">Nouveau projet</header>
-          <form id="new-project" class="form">
-            <input id="proj-name" type="text" placeholder="nom (ex. url-shortener)" required />
-            <textarea id="proj-prompt" rows="7" placeholder="Spécification : stack, endpoints, tests, contraintes…" required></textarea>
-            <button type="submit" class="btn primary">Lancer</button>
+        <!-- Chat with AI -->
+        <section class="card card-chat">
+          <header class="card-head">
+            <span class="card-head-icon">&#x1F4AC;</span>
+            <span>Chat</span>
+          </header>
+          <div id="chat-messages" class="chat-messages">
+            <div class="chat-bubble assistant">
+              Salut ! Je suis ton assistant Multi-Agent Coder.
+              Parle-moi normalement, et quand tu veux g&eacute;n&eacute;rer un projet, dis-le moi !
+            </div>
+          </div>
+          <form id="chat-form" class="chat-input-form">
+            <textarea id="chat-input" rows="2"
+              placeholder="Dis-moi quelque chose&hellip; ou d&eacute;cris un projet &agrave; g&eacute;n&eacute;rer"></textarea>
+            <button type="submit" class="btn primary btn-send" title="Envoyer">&#x27A4;</button>
           </form>
         </section>
 
+        <!-- Manual project creation (collapsed by default) -->
+        <details class="card card-new-project">
+          <summary class="card-head card-head-toggle">
+            <span class="card-head-icon">&#x2795;</span>
+            <span>Nouveau projet (manuel)</span>
+          </summary>
+          <form id="new-project" class="form">
+            <input id="proj-name" type="text" placeholder="nom (ex. url-shortener)" required />
+            <textarea id="proj-prompt" rows="5" placeholder="Sp&eacute;cification : stack, endpoints, tests, contraintes&hellip;" required></textarea>
+            <button type="submit" class="btn primary">Lancer le pipeline</button>
+          </form>
+        </details>
+
         <section class="card">
           <header class="card-head">
+            <span class="card-head-icon">&#x1F4C1;</span>
             <span>Projets</span>
             <span id="projects-count" class="chip">0</span>
           </header>
@@ -40,8 +67,10 @@
         <!-- empty state (no project selected) -->
         <div id="empty-state" class="empty-state">
           <div class="empty-inner">
+            <div class="empty-icon">&#x2726;</div>
             <h1>Multi-Agent Coder</h1>
-            <p>Sélectionne un projet existant ou crée-en un nouveau pour démarrer le pipeline.</p>
+            <p>Commence par discuter dans le chat, ou s&eacute;lectionne un projet existant.</p>
+            <p class="empty-hint">Quand tu veux g&eacute;n&eacute;rer du code, dis simplement ce que tu veux dans le chat !</p>
           </div>
         </div>
 
@@ -49,26 +78,26 @@
         <div id="project-view" class="project-view hidden">
           <header class="proj-head">
             <div class="proj-meta">
-              <h2 id="proj-title">—</h2>
-              <span id="proj-status" class="status-pill">—</span>
+              <h2 id="proj-title">&mdash;</h2>
+              <span id="proj-status" class="status-pill">&mdash;</span>
               <span id="proj-progress" class="proj-progress"></span>
             </div>
             <div class="proj-actions">
-              <button id="btn-pause" class="btn-icon" title="Pause">❚❚</button>
-              <button id="btn-resume" class="btn-icon" title="Reprendre">▶</button>
-              <button id="btn-stop" class="btn-icon danger" title="Arrêter le projet">STOP</button>
-              <a id="btn-zip" class="btn-icon zip hidden" href="#" download title="Télécharger ZIP">⬇ ZIP</a>
-              <button id="btn-delete" class="btn-icon danger" title="Supprimer">✕</button>
+              <button id="btn-pause" class="btn-icon" title="Pause">&#10074;&#10074;</button>
+              <button id="btn-resume" class="btn-icon" title="Reprendre">&#x25B6;</button>
+              <button id="btn-stop" class="btn-icon danger" title="Arr&ecirc;ter le projet">STOP</button>
+              <a id="btn-zip" class="btn-icon zip hidden" href="#" download title="T&eacute;l&eacute;charger ZIP">&#x2B07; ZIP</a>
+              <button id="btn-delete" class="btn-icon danger" title="Supprimer">&#x2715;</button>
             </div>
           </header>
 
           <div class="status-bar">
-            <span id="current-action" class="current-action">En attente…</span>
+            <span id="current-action" class="current-action">En attente&hellip;</span>
           </div>
 
           <nav class="drawers">
             <button class="drawer-tab active" data-tab="stream">Fichiers<span id="stream-count" class="chip">0</span></button>
-            <button class="drawer-tab" data-tab="tasks">Tâches<span id="tasks-count" class="chip">0</span></button>
+            <button class="drawer-tab" data-tab="tasks">T&acirc;ches<span id="tasks-count" class="chip">0</span></button>
             <button class="drawer-tab" data-tab="events">Journal<span id="events-count" class="chip">0</span></button>
             <button class="drawer-tab" data-tab="files">Livrables<span id="files-count" class="chip">0</span></button>
           </nav>
@@ -76,7 +105,7 @@
           <div class="drawer-body">
             <div id="pane-stream" class="pane active">
               <div id="stream-empty" class="stream-empty">
-                En attente de l'écriture du premier fichier…
+                En attente de l'&eacute;criture du premier fichier&hellip;
               </div>
               <ul id="stream" class="stream"></ul>
             </div>
@@ -89,13 +118,13 @@
             <div id="pane-files" class="pane">
               <a id="zip-banner" class="zip-banner hidden" href="#" download>
                 <span class="zip-banner-body">
-                  <span class="zip-banner-title">Télécharger le ZIP du projet</span>
-                  <span class="zip-banner-sub">Livraison complète</span>
+                  <span class="zip-banner-title">T&eacute;l&eacute;charger le ZIP du projet</span>
+                  <span class="zip-banner-sub">Livraison compl&egrave;te</span>
                 </span>
               </a>
               <div class="files-split">
                 <div id="files-tree" class="files-tree"></div>
-                <pre id="file-preview" class="file-preview">Sélectionne un fichier pour voir son contenu.</pre>
+                <pre id="file-preview" class="file-preview">S&eacute;lectionne un fichier pour voir son contenu.</pre>
               </div>
             </div>
           </div>
@@ -103,11 +132,11 @@
           <div class="chat-mailbox">
             <div class="chat-head">
               Note pour les agents
-              <span class="chat-hint">les agents la lisent à leur prochaine itération</span>
+              <span class="chat-hint">les agents la lisent &agrave; leur prochaine it&eacute;ration</span>
             </div>
             <form id="note-form" class="chat-form">
               <textarea id="note-input" rows="2"
-                placeholder="Ex. utilise tailwind ; le dernier fix était faux, revert ; ajoute un endpoint DELETE…"></textarea>
+                placeholder="Ex. utilise tailwind ; le dernier fix &eacute;tait faux, revert ; ajoute un endpoint DELETE&hellip;"></textarea>
               <button type="submit" class="btn primary">Envoyer</button>
             </form>
           </div>

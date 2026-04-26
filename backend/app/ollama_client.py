@@ -175,6 +175,8 @@ class OllamaRouter:
             async with handle.semaphore:
                 acc: list[str] = []
                 async with handle.client.stream("POST", "/api/chat", json=body) as resp:
+                    if resp.status_code >= 400:
+                        await resp.aread()
                     resp.raise_for_status()
                     iterator = resp.aiter_lines().__aiter__()
                     while True:

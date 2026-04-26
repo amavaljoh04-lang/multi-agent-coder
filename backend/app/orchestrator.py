@@ -44,6 +44,7 @@ from .events import bus
 from .models import Event, Project, ProjectFile, ProjectNote, ProjectStatus, Task, TaskStatus, TestRun
 from .ollama_client import OllamaRouter, get_router
 from .sandbox import RunResult, Sandbox
+from .web_search import search_and_format
 
 log = logging.getLogger(__name__)
 
@@ -93,7 +94,19 @@ def _infer_install_command(install_cmd: str, test_cmd: str, workspace: Path) -> 
     if needs_pytest:
         parts.append("pip install --quiet --no-input pytest")
     if install_cmd:
-        parts.append(install_cmd)
+        # Strip references to requirements.txt from the plan's install
+        # command when the file doesn't actually exist yet. The planner
+        # often emits ``pip install -r requirements.txt`` even when the
+        # coder hasn't created the file (or failed to).
+        sanitized = install_cmd
+        if not req.exists():
+            sanitized = re.sub(
+                r"pip\s+install\s+[^\s&;]*-r\s+requirements\.txt\s*", "", sanitized
+            ).strip()
+            sanitized = re.sub(r"^&&\s*|&&\s*$", "", sanitized).strip()
+            sanitized = re.sub(r"&&\s*&&", "&&", sanitized).strip()
+        if sanitized:
+            parts.append(sanitized)
     return " && ".join(parts)
 
 
@@ -371,6 +384,25 @@ class Orchestrator:
         review_notes = task.review_notes or ""
         plan = await self._inject_user_notes(project_id, plan)
 
+        # Web search: gather context for tasks that mention external APIs/libs.
+        web_context = ""
+        task_text = f"{task.title} {task.description}"
+        search_keywords = [
+            "api", "library", "framework", "sdk", "package",
+            "endpoint", "documentation", "tutorial", "how to",
+        ]
+        if any(kw in task_text.lower() for kw in search_keywords):
+            try:
+                search_query = f"{plan.get('language', 'python')} {task.title}"
+                web_context = await search_and_format(search_query, max_results=3)
+                if web_context:
+                    await self.emit(
+                        project_id, "info", "search",
+                        f"[{task.title}] web search context gathered",
+                    )
+            except Exception:
+                pass
+
         await self.emit(
             project_id, "agent", "coder",
             f"[{task.title}] coding {len(task.file_paths)} file(s)",
@@ -380,7 +412,9 @@ class Orchestrator:
             task_dict = {
                 "id": task.id,
                 "title": task.title,
-                "description": task.description,
+                "description": task.description + (
+                    f"\n\n{web_context}" if web_context else ""
+                ),
                 "file_paths": task.file_paths,
             }
             coder_role = self._coder_role_for_files(task.file_paths)
