@@ -21,7 +21,6 @@ from .events import bus
 from .models import Event, Project, ProjectFile, ProjectNote, ProjectStatus, Task
 from .ollama_client import get_router, shutdown_router
 from .orchestrator import get_orchestrator
-from .web_search import search_and_format
 from .schemas import (
     ChatRequest,
     ChatResponse,
@@ -36,6 +35,7 @@ from .schemas import (
     ServerStatus,
     TaskView,
 )
+from .web_search import search_and_format
 
 logging.basicConfig(
     level=logging.INFO,
