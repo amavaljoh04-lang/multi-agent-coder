@@ -93,7 +93,19 @@ def _infer_install_command(install_cmd: str, test_cmd: str, workspace: Path) -> 
     if needs_pytest:
         parts.append("pip install --quiet --no-input pytest")
     if install_cmd:
-        parts.append(install_cmd)
+        # Strip references to requirements.txt from the plan's install
+        # command when the file doesn't actually exist yet. The planner
+        # often emits ``pip install -r requirements.txt`` even when the
+        # coder hasn't created the file (or failed to).
+        sanitized = install_cmd
+        if not req.exists():
+            sanitized = re.sub(
+                r"pip\s+install\s+[^\s&;]*-r\s+requirements\.txt\s*", "", sanitized
+            ).strip()
+            sanitized = re.sub(r"^&&\s*|&&\s*$", "", sanitized).strip()
+            sanitized = re.sub(r"&&\s*&&", "&&", sanitized).strip()
+        if sanitized:
+            parts.append(sanitized)
     return " && ".join(parts)
 
 

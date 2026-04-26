@@ -97,3 +97,15 @@ class NoteView(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(..., min_length=1, max_length=8000)
+    history: list[dict[str, str]] = Field(default_factory=list)
+
+
+class ChatResponse(BaseModel):
+    reply: str
+    intent: str  # "chat" or "generate"
+    project_name: str = ""
+    project_prompt: str = ""

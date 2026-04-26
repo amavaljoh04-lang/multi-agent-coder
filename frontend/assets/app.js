@@ -1,5 +1,5 @@
 /* Multi-Agent Coder — UI client.
-   Sober, functional, no animations. */
+   Chat-first interface with intent detection + pipeline monitoring. */
 
 const $ = (id) => document.getElementById(id);
 
@@ -22,13 +22,111 @@ const state = {
   lastLogCount: 1,
   lastLogCountEl: null,
   eventCount: 0,
-  stream: new Map(), // path -> { el, preEl, statusEl, content, role }
+  stream: new Map(),
   streamOrder: [],
-  currentProject: null, // last-loaded snapshot for progress counters
+  currentProject: null,
   selectedFile: null,
+  chatHistory: [],
+  chatBusy: false,
 };
 
-const FILE_CAP = 8000; // max characters kept in the live pre per file
+const FILE_CAP = 8000;
+
+// ============================================================================
+// Chat with AI (intent detection)
+// ============================================================================
+
+function addChatBubble(role, text) {
+  const container = $("chat-messages");
+  const div = document.createElement("div");
+  div.className = `chat-bubble ${role} fade-in`;
+  div.textContent = text;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  return div;
+}
+
+function addChatLoading() {
+  const container = $("chat-messages");
+  const div = document.createElement("div");
+  div.className = "chat-bubble assistant loading fade-in";
+  div.innerHTML = '<span class="dot-pulse"></span>';
+  div.id = "chat-loading";
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+  return div;
+}
+
+function removeChatLoading() {
+  const el = $("chat-loading");
+  if (el) el.remove();
+}
+
+async function sendChatMessage(message) {
+  if (state.chatBusy || !message.trim()) return;
+  state.chatBusy = true;
+
+  addChatBubble("user", message);
+  state.chatHistory.push({ role: "user", content: message });
+  addChatLoading();
+
+  const input = $("chat-input");
+  const btn = input.closest("form").querySelector("button");
+  input.disabled = true;
+  btn.disabled = true;
+
+  try {
+    const r = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        message,
+        history: state.chatHistory.slice(-6),
+      }),
+    });
+
+    removeChatLoading();
+
+    if (!r.ok) {
+      addChatBubble("assistant", "Erreur de connexion au serveur.");
+      return;
+    }
+
+    const data = await r.json();
+    state.chatHistory.push({ role: "assistant", content: data.reply });
+
+    if (data.intent === "generate") {
+      addChatBubble("assistant", data.reply);
+      // Auto-create the project.
+      const pr = await fetch("/api/projects", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name: data.project_name || "project",
+          prompt: data.project_prompt || message,
+        }),
+      });
+      if (pr.ok) {
+        const p = await pr.json();
+        addChatBubble("assistant", `Projet « ${p.name} » lancé ! Je t'ouvre le suivi.`);
+        await refreshProjects();
+        openProject(p.id);
+      } else {
+        addChatBubble("assistant", "Erreur lors de la création du projet.");
+      }
+    } else {
+      addChatBubble("assistant", data.reply);
+    }
+  } catch (_) {
+    removeChatLoading();
+    addChatBubble("assistant", "Impossible de joindre le serveur.");
+  } finally {
+    state.chatBusy = false;
+    input.disabled = false;
+    btn.disabled = false;
+    input.focus();
+  }
+}
 
 // ============================================================================
 // Servers status chips
@@ -71,14 +169,14 @@ async function refreshProjects() {
     li.className = "project-item" + (p.id === state.currentId ? " active" : "");
     li.innerHTML = `<div class="name">${escape(p.name)}</div>
       <div class="status">${escape(p.status)} · ${new Date(p.created_at).toLocaleDateString()}</div>
-      <button class="del" title="Supprimer">×</button>`;
+      <button class="del" title="Supprimer">\u00d7</button>`;
     li.addEventListener("click", (e) => {
       if (e.target.classList.contains("del")) return;
       openProject(p.id);
     });
     li.querySelector(".del").addEventListener("click", async (e) => {
       e.stopPropagation();
-      if (!confirm(`Supprimer « ${p.name} » ?`)) return;
+      if (!confirm(`Supprimer \u00ab ${p.name} \u00bb ?`)) return;
       await deleteProject(p.id);
     });
     el.appendChild(li);
@@ -89,7 +187,7 @@ async function refreshProjects() {
 
 async function deleteProject(id) {
   const r = await fetch(`/api/projects/${id}`, { method: "DELETE" });
-  if (!r.ok) { alert("Suppression échouée"); return; }
+  if (!r.ok) { alert("Suppression \u00e9chou\u00e9e"); return; }
   if (state.currentId === id) {
     state.currentId = null;
     if (state.ws) { try { state.ws.close(); } catch {} state.ws = null; }
@@ -115,8 +213,8 @@ async function openProject(id) {
   $("empty-state").classList.add("hidden");
   $("project-view").classList.remove("hidden");
   $("logs").innerHTML = "";
-  $("file-preview").textContent = "Sélectionne un fichier pour voir son contenu.";
-  $("current-action").textContent = "Initialisation…";
+  $("file-preview").textContent = "S\u00e9lectionne un fichier pour voir son contenu.";
+  $("current-action").textContent = "Initialisation\u2026";
   $("events-count").textContent = "0";
   $("proj-progress").innerHTML = "";
   _resetStream();
@@ -147,7 +245,7 @@ async function loadProject(id) {
     li.className = `task t-${t.status}`;
     const notes = t.review_notes ? `<div class="notes">${escape(t.review_notes)}</div>` : "";
     li.innerHTML = `<div class="title">${escape(t.title)}</div>
-      <div class="meta">${t.status} · ${t.attempts} essai(s) · ${t.file_paths.length} fichier(s)</div>
+      <div class="meta">${t.status} \u00b7 ${t.attempts} essai(s) \u00b7 ${t.file_paths.length} fichier(s)</div>
       ${notes}`;
     tasks.appendChild(li);
   }
@@ -174,8 +272,8 @@ function updateProgress() {
   const totalFiles = Math.max(plannedFiles.size, writtenFiles);
   el.innerHTML =
     `<b>${writtenFiles}</b>/${totalFiles || "?"} fichiers` +
-    `<span class="sep">·</span>` +
-    `<b>${doneTasks}</b>/${totalTasks || "?"} tâches`;
+    `<span class="sep">\u00b7</span>` +
+    `<b>${doneTasks}</b>/${totalTasks || "?"} t\u00e2ches`;
 }
 
 // ============================================================================
@@ -190,11 +288,10 @@ function renderFileTree(projectId, files) {
     empty.className = "tree-node";
     empty.style.color = "var(--muted)";
     empty.style.fontStyle = "italic";
-    empty.textContent = "Aucun fichier écrit pour l'instant.";
+    empty.textContent = "Aucun fichier \u00e9crit pour l\u2019instant.";
     root.appendChild(empty);
     return;
   }
-  // Build an object tree from flat paths.
   const tree = {};
   for (const f of files) {
     const parts = f.path.split("/");
@@ -218,12 +315,12 @@ function renderFileTree(projectId, files) {
       if (child.__file) {
         div.className = "tree-node file";
         const f = child.__file;
-        div.innerHTML = `📄 ${escape(name)}<span class="rev">r${f.revision}</span>`;
+        div.innerHTML = `\ud83d\udcc4 ${escape(name)}<span class="rev">r${f.revision}</span>`;
         div.addEventListener("click", () => selectFile(projectId, f.path, div));
         if (state.selectedFile === f.path) div.classList.add("active");
       } else {
         div.className = "tree-node dir";
-        div.textContent = `📁 ${name}/`;
+        div.textContent = `\ud83d\udcc1 ${name}/`;
       }
       root.appendChild(div);
       if (!child.__file) walk(child, depth + 1, prefix + name + "/");
@@ -286,10 +383,10 @@ function _ensureFileEntry(path, role) {
   if (emptyEl) emptyEl.classList.add("hidden");
 
   const li = document.createElement("li");
-  li.className = "stream-file writing";
+  li.className = "stream-file writing fade-in";
   li.innerHTML =
     `<header class="stream-head">
-       <span class="stream-status" title="en écriture">●</span>
+       <span class="stream-status" title="en \u00e9criture">\u25cf</span>
        <span class="stream-path">${escape(path)}</span>
        <span class="stream-agent">${escape((role || "coder").toUpperCase())}</span>
      </header>
@@ -315,8 +412,8 @@ function streamFileStart(path, role) {
   entry.preEl.textContent = "";
   entry.role = role || entry.role;
   entry.el.className = "stream-file writing";
-  entry.statusEl.textContent = "●";
-  entry.statusEl.title = "en écriture";
+  entry.statusEl.textContent = "\u25cf";
+  entry.statusEl.title = "en \u00e9criture";
   entry.el.scrollIntoView({ behavior: "smooth", block: "nearest" });
 }
 
@@ -324,7 +421,7 @@ function streamFileChunk(path, delta) {
   const entry = _ensureFileEntry(path, "coder");
   entry.content += delta;
   if (entry.content.length > FILE_CAP) {
-    entry.content = "…" + entry.content.slice(-FILE_CAP);
+    entry.content = "\u2026" + entry.content.slice(-FILE_CAP);
   }
   entry.preEl.textContent = entry.content;
   entry.preEl.scrollTop = entry.preEl.scrollHeight;
@@ -334,8 +431,8 @@ function streamFileEnd(path) {
   const entry = state.stream.get(path);
   if (!entry) return;
   entry.el.className = "stream-file written";
-  entry.statusEl.textContent = "○";
-  entry.statusEl.title = "écriture terminée";
+  entry.statusEl.textContent = "\u25cb";
+  entry.statusEl.title = "\u00e9criture termin\u00e9e";
 }
 
 function streamFileReviewStart(path) {
@@ -349,8 +446,8 @@ function streamFileReviewEnd(path, approved) {
   const entry = state.stream.get(path);
   if (!entry) return;
   entry.el.className = "stream-file " + (approved ? "approved" : "rejected");
-  entry.statusEl.textContent = approved ? "✓" : "✗";
-  entry.statusEl.title = approved ? "approuvé" : "rejeté";
+  entry.statusEl.textContent = approved ? "\u2713" : "\u2717";
+  entry.statusEl.title = approved ? "approuv\u00e9" : "rejet\u00e9";
 }
 
 function _resetStream() {
@@ -370,8 +467,6 @@ function handleEvent(id, msg) {
     state.seenEvents.add(msg.id);
   }
 
-  // File-level streaming events drive the "Fichiers" panel (live file writing
-  // + review verdicts). They're silent on the event log so they don't spam.
   if (msg.kind === "file_start") {
     const path = msg.data?.path || msg.message;
     if (path) streamFileStart(path, msg.role || "coder");
@@ -415,13 +510,13 @@ function handleEvent(id, msg) {
     const buf = (cur + (msg.message || "")).slice(-180);
     line.dataset.role = msg.role;
     line.dataset.buf = buf;
-    line.textContent = `${(ROLE_LABEL[msg.role] || msg.role || "").toUpperCase()} · ${buf}`;
+    line.textContent = `${(ROLE_LABEL[msg.role] || msg.role || "").toUpperCase()} \u00b7 ${buf}`;
     return;
   }
 
   if (msg.kind === "agent") {
     $("current-action").textContent =
-      `${(ROLE_LABEL[msg.role] || msg.role || "").toUpperCase()} · ${msg.message || ""}`;
+      `${(ROLE_LABEL[msg.role] || msg.role || "").toUpperCase()} \u00b7 ${msg.message || ""}`;
     $("current-action").dataset.buf = "";
     return;
   }
@@ -439,11 +534,11 @@ function appendLog(msg) {
   const key = `${msg.kind}|${msg.role || ""}|${msg.message || ""}`;
   if (key === state.lastLogKey && state.lastLogCountEl) {
     state.lastLogCount += 1;
-    state.lastLogCountEl.textContent = ` ×${state.lastLogCount}`;
+    state.lastLogCountEl.textContent = ` \u00d7${state.lastLogCount}`;
     return;
   }
   const div = document.createElement("div");
-  div.className = `log-line k-${msg.kind}` + (msg.role ? ` r-${msg.role}` : "");
+  div.className = `log-line k-${msg.kind} fade-in` + (msg.role ? ` r-${msg.role}` : "");
   const time = new Date().toLocaleTimeString();
   const role = msg.role ? `<span class="log-role">${escape(msg.role)}</span>` : "";
 
@@ -468,8 +563,6 @@ function appendLog(msg) {
 
   if (detailsText) {
     const details = document.createElement("pre");
-    // Inline by default (no click-to-expand) so pytest / stderr output is
-    // immediately visible. Colored red for errors so failures pop.
     let cls = "log-details";
     if (msg.kind === "error") cls += " err";
     else if (msg.kind === "warning") cls += " warn";
@@ -501,7 +594,7 @@ async function loadNotes(id) {
       appendLog({
         kind: "info",
         role: "user",
-        message: `Note de l'utilisateur : ${n.content}`,
+        message: `Note de l\u2019utilisateur : ${n.content}`,
       });
     }
   } catch (_) { /* silent */ }
@@ -520,6 +613,23 @@ async function postNote(id, content) {
 // UI wiring
 // ============================================================================
 
+// Chat form
+$("chat-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const input = $("chat-input");
+  const msg = input.value.trim();
+  if (!msg) return;
+  input.value = "";
+  await sendChatMessage(msg);
+});
+$("chat-input").addEventListener("keydown", (e) => {
+  if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
+    e.preventDefault();
+    $("chat-form").dispatchEvent(new Event("submit", { cancelable: true }));
+  }
+});
+
+// Manual project form
 $("new-project").addEventListener("submit", async (e) => {
   e.preventDefault();
   const name = $("proj-name").value.trim();
@@ -537,7 +647,7 @@ $("new-project").addEventListener("submit", async (e) => {
     await refreshProjects();
     openProject(p.id);
   } else {
-    alert("Création échouée");
+    alert("Cr\u00e9ation \u00e9chou\u00e9e");
   }
 });
 
@@ -559,7 +669,7 @@ $("btn-resume").addEventListener("click", async () => {
 });
 $("btn-stop").addEventListener("click", async () => {
   if (!state.currentId) return;
-  if (!confirm("Arrêter le projet en cours ? Les fichiers déjà écrits sont conservés.")) return;
+  if (!confirm("Arr\u00eater le projet en cours ? Les fichiers d\u00e9j\u00e0 \u00e9crits sont conserv\u00e9s.")) return;
   await fetch(`/api/projects/${state.currentId}/control`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -575,12 +685,10 @@ $("note-form").addEventListener("submit", async (e) => {
   const ok = await postNote(state.currentId, content);
   if (ok) {
     ta.value = "";
-    // Event stream will surface it as an "info" log (server-side emit).
   } else {
-    alert("Envoi de la note échoué");
+    alert("Envoi de la note \u00e9chou\u00e9");
   }
 });
-// Submit on Ctrl+Enter / Cmd+Enter so users don't have to reach for the button.
 $("note-input").addEventListener("keydown", (e) => {
   if ((e.ctrlKey || e.metaKey) && e.key === "Enter") {
     e.preventDefault();
@@ -591,7 +699,7 @@ $("btn-delete").addEventListener("click", async () => {
   if (!state.currentId) return;
   const current = state.projects.find((p) => p.id === state.currentId);
   const label = current ? current.name : state.currentId;
-  if (!confirm(`Supprimer « ${label} » ?`)) return;
+  if (!confirm(`Supprimer \u00ab ${label} \u00bb ?`)) return;
   await deleteProject(state.currentId);
 });
 

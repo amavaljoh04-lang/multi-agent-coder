@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import shutil
 from contextlib import asynccontextmanager
@@ -20,6 +21,8 @@ from .models import Event, Project, ProjectFile, ProjectNote, ProjectStatus, Tas
 from .ollama_client import get_router, shutdown_router
 from .orchestrator import get_orchestrator
 from .schemas import (
+    ChatRequest,
+    ChatResponse,
     ControlRequest,
     CreateNoteRequest,
     CreateProjectRequest,
@@ -110,6 +113,70 @@ async def list_servers() -> list[ServerStatus]:
             )
         )
     return result
+
+
+INTENT_SYSTEM = (
+    "You are an intent classifier. The user sends a message in a chat. "
+    "Decide if they want to GENERATE a coding project, or just CHAT. "
+    "Respond with ONLY valid JSON, no markdown, no prose.\n"
+    '{"intent":"chat","reply":"your conversational reply here"}\n'
+    "OR\n"
+    '{"intent":"generate","project_name":"short-name","project_prompt":"full spec","reply":"brief ack"}\n'
+    "Rules:\n"
+    "- Greetings like 'salut', 'hello', 'bonjour', 'ça va' → intent=chat\n"
+    "- Questions about you, tech topics, general discussion → intent=chat\n"
+    "- Explicit requests like 'crée', 'génère', 'build', 'code', 'make me' → intent=generate\n"
+    "- Reply in the same language as the user.\n"
+    "- Keep replies short and friendly for chat intent.\n"
+    "- For generate intent, extract a clear project_name (slug) and project_prompt (full spec)."
+)
+
+CHAT_SYSTEM = (
+    "You are a friendly AI assistant embedded in Multi-Agent Coder, a tool "
+    "that generates full coding projects via an AI pipeline. When the user "
+    "chats casually, respond helpfully and concisely. Reply in the same "
+    "language as the user. Keep responses short (2-4 sentences max)."
+)
+
+
+@app.post("/api/chat", response_model=ChatResponse)
+async def chat(req: ChatRequest) -> ChatResponse:
+    router = get_router()
+
+    # Build messages for intent classification.
+    messages: list[dict[str, str]] = [{"role": "system", "content": INTENT_SYSTEM}]
+    for h in req.history[-6:]:
+        messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
+    messages.append({"role": "user", "content": req.message})
+
+    try:
+        raw = await router.chat("dispatcher", messages, json_mode=True)
+        data = json.loads(raw)
+        intent = data.get("intent", "chat")
+        reply = data.get("reply", "")
+        if intent == "generate":
+            return ChatResponse(
+                reply=reply or "C'est parti, je lance le pipeline !",
+                intent="generate",
+                project_name=data.get("project_name", "project"),
+                project_prompt=data.get("project_prompt", req.message),
+            )
+    except Exception:
+        # Fallback: intent detection failed, try a simple chat response.
+        intent = "chat"
+        reply = ""
+
+    if not reply:
+        chat_messages: list[dict[str, str]] = [{"role": "system", "content": CHAT_SYSTEM}]
+        for h in req.history[-6:]:
+            chat_messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
+        chat_messages.append({"role": "user", "content": req.message})
+        try:
+            reply = await router.chat("dispatcher", chat_messages)
+        except Exception:
+            reply = "Désolé, je n'arrive pas à joindre le modèle pour le moment. Réessaye dans quelques instants."
+
+    return ChatResponse(reply=reply, intent="chat")
 
 
 @app.post("/api/projects", response_model=ProjectSummary)
