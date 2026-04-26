@@ -3,10 +3,23 @@
 **Un pipeline multi-agent autonome qui transforme une description en projet complet, 
 testé et livré en ZIP — directement dans ton chat Open-WebUI.**
 
-## Comment ça marche
+## Deux modes
 
-Tu sélectionnes "Multi-Agent Coder" comme modèle dans Open-WebUI, tu décris ton
-projet, et le pipeline fait tout :
+### Mode Chat Normal
+Quand tu parles normalement ("Salut", "Explique-moi X", "Comment faire Y"), 
+le modèle répond comme un assistant classique via Ollama.
+
+### Mode Multi-Agent (automatique ou `/build`)
+Quand tu demandes de **créer/générer/coder un projet**, le pipeline multi-agent 
+se déclenche automatiquement. Tu peux aussi forcer le mode avec les commandes :
+- `/build <description>` 
+- `/code <description>`
+- `/project <description>`
+
+**Détection automatique** : le système reconnaît les demandes de type 
+*"Crée une API..."*, *"Génère un script..."*, *"Développe un bot..."* etc.
+
+## Pipeline Multi-Agent
 
 ```
   Ton prompt
@@ -17,23 +30,19 @@ projet, et le pipeline fait tout :
   └────────────────────┘
       │
   ┌────────────────────┐
-  │ 2. Architect       │  Arbre de fichiers + specs
+  │ 2. Coder           │  Génère chaque fichier (streaming live)
   └────────────────────┘
       │
   ┌────────────────────┐
-  │ 3. Coder           │  Génère chaque fichier (streaming live)
+  │ 3. Reviewer        │  Vérifie la qualité du code
   └────────────────────┘
       │
   ┌────────────────────┐
-  │ 4. Reviewer        │  Vérifie la qualité du code
-  └────────────────────┘
-      │
-  ┌────────────────────┐
-  │ 5. Test + Fix Loop │  Sandbox → Analyse → Fix → re-test
+  │ 4. Test + Fix Loop │  Sandbox → Analyse → Fix → re-test
   └────────────────────┘  (boucle jusqu'à ce que ça marche)
       │
   ┌────────────────────┐
-  │ 6. ZIP             │  Téléchargement automatique
+  │ 5. ZIP             │  Téléchargement automatique
   └────────────────────┘
 ```
 
@@ -41,9 +50,9 @@ projet, et le pipeline fait tout :
 
 1. Ouvre Open-WebUI
 2. Va dans **Workspace > Functions** (ou **Espace de travail > Fonctions**)
-3. Clique sur **Import** (icône d'import)
-4. Sélectionne le fichier `multi_agent_coder.py`
-5. C'est tout — "Multi-Agent Coder" apparaît dans la liste des modèles
+3. Clique sur **+** pour créer une nouvelle fonction
+4. Copie/colle le contenu de `multi_agent_coder.py`
+5. Sauvegarde — "Multi-Agent Coder" apparaît dans la liste des modèles
 
 ## Configuration (Valves)
 
@@ -52,14 +61,14 @@ Après l'import, clique sur la fonction pour configurer les **Valves** :
 | Valve | Défaut | Description |
 |-------|--------|-------------|
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | URL de ton serveur Ollama |
+| `CHAT_MODEL` | `qwen2.5-coder:7b` | Modèle pour le chat normal |
 | `PLANNER_MODEL` | `qwen2.5-coder:7b` | Modèle pour le planning |
-| `ARCHITECT_MODEL` | `qwen2.5-coder:7b` | Modèle pour l'architecture |
 | `CODER_MODEL` | `qwen2.5-coder:14b` | Modèle principal (le plus important) |
 | `REVIEWER_MODEL` | `deepseek-coder:6.7b` | Modèle pour la review |
 | `ANALYST_MODEL` | `deepseek-coder:6.7b` | Modèle pour analyser les erreurs |
 | `FIXER_MODEL` | `qwen2.5-coder:14b` | Modèle pour les corrections |
 | `SANDBOX_TIMEOUT` | `120` | Timeout du sandbox (secondes) |
-| `MAX_FIX_ITERATIONS` | `15` | Nombre max d'itérations (-1 = illimité) |
+| `MAX_FIX_ITERATIONS` | `10` | Nombre max d'itérations (-1 = illimité) |
 | `SANDBOX_MODE` | `auto` | `docker`, `local`, ou `auto` |
 | `DOCKER_IMAGE` | `python:3.12-slim` | Image Docker pour le sandbox |
 | `NUM_CTX` | `16384` | Taille du contexte Ollama |
@@ -69,6 +78,7 @@ Après l'import, clique sur la fonction pour configurer les **Valves** :
 
 **Un seul GPU (8+ Go VRAM) :**
 ```
+CHAT_MODEL = qwen2.5-coder:7b
 PLANNER_MODEL = qwen2.5-coder:7b
 CODER_MODEL = qwen2.5-coder:7b
 REVIEWER_MODEL = qwen2.5-coder:7b
@@ -85,43 +95,36 @@ FIXER_MODEL = qwen2.5-coder:14b
 
 **Multi-GPU (setup Johnny : 5070 + 4060 + 3070) :**
 ```
-OLLAMA_BASE_URL = http://192.168.0.224:11434  (ou utiliser un load balancer)
+OLLAMA_BASE_URL = http://192.168.0.224:11434
 CODER_MODEL = qwen2.5-coder:32b
 PLANNER_MODEL = qwen2.5-coder:7b
 ```
 
-## Affichage en temps réel
-
-Le pipeline affiche tout en live dans le chat Open-WebUI :
-
-- **Barre de statut** avec animation shimmer pendant le traitement
-- **Tableau des tâches** avec progression
-- **Arbre de fichiers** du projet
-- **Code généré** streamé en temps réel
-- **Résultats des tests** avec output complet
-- **Boucle de fix** visible étape par étape
-- **Bouton de téléchargement** du ZIP final
-- **Notifications** toast pour les événements importants
-
 ## Exemple d'utilisation
 
+**Chat normal :**
 ```
-Crée une API FastAPI avec :
-- Auth JWT (login/register)
-- CRUD pour des todos (create, list, update, delete)
-- Base SQLite
-- pytest avec au moins 5 tests
-- requirements.txt
-- README.md
+> Salut !
+< Salut ! Comment je peux t'aider ?
+
+> Explique-moi les decorateurs Python
+< Les décorateurs en Python sont des fonctions qui modifient...
 ```
 
-Le pipeline va :
-1. Planifier 8-12 tâches
-2. Générer ~10 fichiers (main.py, models.py, auth.py, routes.py, tests/, etc.)
-3. Reviewer le code
-4. Lancer `pip install -r requirements.txt && pytest -v`
-5. Fixer les erreurs en boucle (souvent 2-5 itérations)
-6. Te donner un ZIP téléchargeable
+**Mode multi-agent (automatique) :**
+```
+> Crée une API FastAPI avec auth JWT et tests pytest
+< [Pipeline multi-agent démarre]
+  Phase 1/5 : Planification...
+  Phase 2/5 : Codage...
+  ...
+  [Bouton télécharger ZIP]
+```
+
+**Mode multi-agent (commande explicite) :**
+```
+> /build un calculateur de nombres premiers en Python avec CLI et tests
+```
 
 ## Sandbox
 
@@ -137,7 +140,7 @@ Le code généré est testé dans un **sandbox isolé** :
 
 Aucune installation serveur requise. Le fichier utilise uniquement :
 - `httpx` (déjà inclus dans Open-WebUI)
-- Modules standard Python (`asyncio`, `json`, `subprocess`, `zipfile`, etc.)
+- Modules standard Python (`asyncio`, `json`, `zipfile`, etc.)
 
 ## Limites connues
 

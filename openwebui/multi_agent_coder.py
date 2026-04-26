@@ -3,10 +3,10 @@ title: Multi-Agent Coder
 author: Johnny
 author_url: https://github.com/amavaljoh04-lang
 git_url: https://github.com/amavaljoh04-lang/multi-agent-coder.git
-description: Pipeline multi-agent autonome pour Open-WebUI. Donne un prompt, il decompose en projet, code, teste en boucle dans un sandbox, et livre un ZIP. Affichage riche en temps reel dans le chat.
+description: Pipeline multi-agent autonome pour Open-WebUI. Decris un projet, il le code, teste en boucle, et livre un ZIP. En mode chat normal sinon.
 required_open_webui_version: 0.4.0
 requirements: httpx
-version: 1.0.0
+version: 2.0.0
 licence: MIT
 """
 
@@ -30,12 +30,29 @@ from pydantic import BaseModel, Field
 log = logging.getLogger("multi_agent_coder")
 
 # ---------------------------------------------------------------------------
-# JSON / code-block extraction (same battle-tested logic as the backend)
+# Helpers: JSON / code-block extraction
 # ---------------------------------------------------------------------------
 
 _JSON_BLOCK = re.compile(r"```(?:json)?\s*(\{.*?\}|\[.*?\])\s*```", re.DOTALL)
 _FIRST_BRACE = re.compile(r"(\{.*\}|\[.*\])", re.DOTALL)
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
+
+# Keywords that signal a project-generation request (FR + EN)
+_BUILD_VERBS = re.compile(
+    r"\b(cree|crée|créé|genere|génère|generer|générer|code|programme|"
+    r"developpe|développe|construis|fais|build|create|generate|make|"
+    r"write|develop|implement|implémente|implemente)\b",
+    re.IGNORECASE,
+)
+_BUILD_NOUNS = re.compile(
+    r"\b(projet|project|application|app|api|script|site|website|"
+    r"programme|program|outil|tool|cli|bot|jeu|game|serveur|server|"
+    r"library|lib|package|module|service|microservice|dashboard|"
+    r"backend|frontend|fullstack|pipeline)\b",
+    re.IGNORECASE,
+)
+# Explicit trigger prefix — always activates the pipeline
+_TRIGGER_PREFIX = re.compile(r"^/(build|code|projet|project|generate)\b", re.IGNORECASE)
 
 
 def _strip_reasoning(text: str) -> str:
@@ -75,8 +92,17 @@ def _extract_code_blocks(text: str) -> dict[str, str]:
     return blocks
 
 
+def _is_build_request(text: str) -> bool:
+    """Return True if the message looks like a project-generation request."""
+    if _TRIGGER_PREFIX.search(text):
+        return True
+    has_verb = bool(_BUILD_VERBS.search(text))
+    has_noun = bool(_BUILD_NOUNS.search(text))
+    return has_verb and has_noun
+
+
 # ---------------------------------------------------------------------------
-# System prompts for each agent role
+# System prompts
 # ---------------------------------------------------------------------------
 
 PLAN_SYSTEM = (
@@ -261,32 +287,28 @@ Identify the root cause. Output JSON:
 class Pipe:
     """Multi-Agent Coder Pipeline for Open-WebUI.
 
-    Appears as a selectable model. Send it a project description and it will:
-    1. Plan the project (tasks, files, dependencies)
-    2. Architect the structure
-    3. Code every file
-    4. Review for quality
-    5. Test in a sandbox (subprocess)
-    6. Fix in a loop until all tests pass
-    7. Deliver a downloadable ZIP
+    In normal chat mode, forwards messages to the configured Ollama model.
+    When a project-generation request is detected (or /build command used),
+    it activates the full multi-agent pipeline:
+    Plan -> Code -> Review -> Test+Fix loop -> ZIP download.
     """
 
     class Valves(BaseModel):
         OLLAMA_BASE_URL: str = Field(
             default="http://localhost:11434",
-            description="URL de base de ton serveur Ollama (ex: http://192.168.0.224:11434)",
+            description="URL de base de ton serveur Ollama",
+        )
+        CHAT_MODEL: str = Field(
+            default="qwen2.5-coder:7b",
+            description="Modele pour le chat normal (quand tu ne generes pas de projet)",
         )
         PLANNER_MODEL: str = Field(
             default="qwen2.5-coder:7b",
-            description="Modele pour le planning (decomposition du projet)",
-        )
-        ARCHITECT_MODEL: str = Field(
-            default="qwen2.5-coder:7b",
-            description="Modele pour l'architecture (specs par fichier)",
+            description="Modele pour le planning",
         )
         CODER_MODEL: str = Field(
             default="qwen2.5-coder:14b",
-            description="Modele principal pour coder (le plus intelligent)",
+            description="Modele principal pour coder",
         )
         REVIEWER_MODEL: str = Field(
             default="deepseek-coder:6.7b",
@@ -294,23 +316,23 @@ class Pipe:
         )
         ANALYST_MODEL: str = Field(
             default="deepseek-coder:6.7b",
-            description="Modele pour analyser les erreurs de tests",
+            description="Modele pour analyser les erreurs",
         )
         FIXER_MODEL: str = Field(
             default="qwen2.5-coder:14b",
-            description="Modele pour fixer les bugs (meme qualite que le coder)",
+            description="Modele pour fixer les bugs",
         )
         SANDBOX_TIMEOUT: int = Field(
             default=120,
             description="Timeout du sandbox en secondes",
         )
         MAX_FIX_ITERATIONS: int = Field(
-            default=15,
+            default=10,
             description="Nombre max d'iterations de fix (-1 = illimite)",
         )
         SANDBOX_MODE: str = Field(
             default="auto",
-            description="Mode sandbox: 'docker', 'local', ou 'auto' (docker si disponible)",
+            description="Mode sandbox: 'docker', 'local', ou 'auto'",
         )
         DOCKER_IMAGE: str = Field(
             default="python:3.12-slim",
@@ -318,17 +340,17 @@ class Pipe:
         )
         NUM_CTX: int = Field(
             default=16384,
-            description="Taille du contexte Ollama (num_ctx)",
+            description="Taille du contexte Ollama",
         )
         TEMPERATURE: float = Field(
             default=0.15,
-            description="Temperature par defaut pour la generation",
+            description="Temperature par defaut",
         )
 
     def __init__(self) -> None:
         self.valves = self.Valves()
 
-    # ------------------------------------------------------------------ helpers
+    # ================================================================ emitters
     async def _emit_status(
         self,
         emitter: Optional[Callable],
@@ -349,12 +371,6 @@ class Pipe:
                 {"type": "chat:message:delta", "data": {"content": content}}
             )
 
-    async def _emit_replace(self, emitter: Optional[Callable], content: str) -> None:
-        if emitter:
-            await emitter(
-                {"type": "chat:message", "data": {"content": content}}
-            )
-
     async def _emit_notification(
         self, emitter: Optional[Callable], content: str, level: str = "info"
     ) -> None:
@@ -363,7 +379,7 @@ class Pipe:
                 {"type": "notification", "data": {"type": level, "content": content}}
             )
 
-    # ------------------------------------------------------------------ Ollama
+    # ================================================================ Ollama
     async def _ollama_chat(
         self,
         model: str,
@@ -372,9 +388,12 @@ class Pipe:
         json_mode: bool = False,
         temperature: float | None = None,
         emitter: Optional[Callable] = None,
-        stream_label: str = "",
+        stream_to_chat: bool = False,
     ) -> str:
-        """Call Ollama /api/chat with streaming, pushing tokens to the chat."""
+        """Call Ollama /api/chat, stream tokens, return full text.
+
+        Uses aiter_bytes + manual NDJSON splitting for maximum httpx compat.
+        """
         import httpx
 
         url = f"{self.valves.OLLAMA_BASE_URL.rstrip('/')}/api/chat"
@@ -392,44 +411,69 @@ class Pipe:
 
         full_text = ""
         try:
-            async with httpx.AsyncClient(timeout=httpx.Timeout(connect=15.0, read=None, write=60.0, pool=30.0)) as client:
+            async with httpx.AsyncClient(
+                timeout=httpx.Timeout(connect=15.0, read=600.0, write=60.0, pool=30.0)
+            ) as client:
                 async with client.stream("POST", url, json=payload) as resp:
                     resp.raise_for_status()
-                    async for line in resp.aiter_lines():
-                        if not line.strip():
-                            continue
-                        try:
-                            chunk = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        token = chunk.get("message", {}).get("content", "")
-                        if token:
-                            full_text += token
-                            if emitter and stream_label:
-                                await self._emit_message(emitter, token)
-                        if chunk.get("done"):
-                            break
+                    buf = b""
+                    async for raw_chunk in resp.aiter_bytes():
+                        buf += raw_chunk
+                        while b"\n" in buf:
+                            line_bytes, buf = buf.split(b"\n", 1)
+                            line_str = line_bytes.decode("utf-8", errors="replace").strip()
+                            if not line_str:
+                                continue
+                            try:
+                                chunk = json.loads(line_str)
+                            except json.JSONDecodeError:
+                                continue
+                            token = chunk.get("message", {}).get("content", "")
+                            if token:
+                                full_text += token
+                                if stream_to_chat and emitter:
+                                    await self._emit_message(emitter, token)
+                            if chunk.get("done"):
+                                break
         except httpx.HTTPStatusError as exc:
+            err_body = ""
+            try:
+                err_body = exc.response.text[:500]
+            except Exception:
+                pass
             raise RuntimeError(
-                f"Ollama returned {exc.response.status_code}: {exc.response.text[:500]}"
+                f"Ollama HTTP {exc.response.status_code}: {err_body}"
             ) from exc
         except httpx.ConnectError as exc:
             raise RuntimeError(
-                f"Cannot connect to Ollama at {self.valves.OLLAMA_BASE_URL}. "
-                f"Verifie que le serveur est lance. ({exc})"
+                f"Impossible de se connecter a Ollama ({self.valves.OLLAMA_BASE_URL}). "
+                f"Verifie que le serveur tourne. Erreur: {exc}"
             ) from exc
 
         return _strip_reasoning(full_text)
 
-    # ------------------------------------------------------------------ Sandbox
+    async def _ollama_chat_simple(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        emitter: Optional[Callable] = None,
+    ) -> str:
+        """Simple chat that streams every token to the user (for normal conversation)."""
+        return await self._ollama_chat(
+            model,
+            messages,
+            temperature=0.7,
+            emitter=emitter,
+            stream_to_chat=True,
+        )
+
+    # ================================================================ Sandbox
     async def _run_sandbox(
         self, workspace: Path, command: str
     ) -> tuple[int, str, str, bool]:
-        """Run a command in the sandbox. Returns (exit_code, stdout, stderr, timed_out)."""
         mode = self.valves.SANDBOX_MODE
         if mode == "auto":
             mode = "docker" if shutil.which("docker") else "local"
-
         if mode == "docker":
             return await self._run_docker(workspace, command)
         return await self._run_local(workspace, command)
@@ -445,7 +489,6 @@ class Pipe:
             stderr=asyncio.subprocess.PIPE,
             cwd=ws,
         )
-        timed_out = False
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
                 proc.communicate(), timeout=self.valves.SANDBOX_TIMEOUT
@@ -453,10 +496,9 @@ class Pipe:
         except TimeoutError:
             proc.kill()
             await proc.wait()
-            timed_out = True
             return -1, "", f"Timeout after {self.valves.SANDBOX_TIMEOUT}s", True
         rc = proc.returncode if proc.returncode is not None else -1
-        return rc, stdout_b.decode("utf-8", errors="replace"), stderr_b.decode("utf-8", errors="replace"), timed_out
+        return rc, stdout_b.decode("utf-8", errors="replace"), stderr_b.decode("utf-8", errors="replace"), False
 
     async def _run_docker(
         self, workspace: Path, command: str
@@ -479,7 +521,6 @@ class Pipe:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
-        timed_out = False
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
                 proc.communicate(), timeout=self.valves.SANDBOX_TIMEOUT
@@ -489,13 +530,11 @@ class Pipe:
             await proc.wait()
             return -1, "", f"Timeout after {self.valves.SANDBOX_TIMEOUT}s", True
         rc = proc.returncode if proc.returncode is not None else -1
-        return rc, stdout_b.decode("utf-8", errors="replace"), stderr_b.decode("utf-8", errors="replace"), timed_out
+        return rc, stdout_b.decode("utf-8", errors="replace"), stderr_b.decode("utf-8", errors="replace"), False
 
-    # ------------------------------------------------------------------ Agents
+    # ================================================================ Agents
 
-    async def _run_planner(
-        self, prompt: str, emitter: Optional[Callable]
-    ) -> dict[str, Any]:
+    async def _run_planner(self, prompt: str) -> dict[str, Any]:
         messages = [
             {"role": "system", "content": PLAN_SYSTEM},
             {"role": "user", "content": PLAN_PROMPT.format(prompt=prompt)},
@@ -532,18 +571,17 @@ class Pipe:
             self.valves.CODER_MODEL,
             messages,
             emitter=emitter,
-            stream_label="coder",
+            stream_to_chat=True,
         )
         blocks = _extract_code_blocks(raw)
         if not blocks:
-            raise ValueError("Coder did not produce any fenced file blocks")
+            raise ValueError("Le coder n'a produit aucun bloc de fichier")
         return blocks
 
     async def _run_reviewer(
         self,
         plan: dict[str, Any],
         files: dict[str, str],
-        emitter: Optional[Callable],
     ) -> dict[str, Any]:
         files_block = self._fmt_existing(files)
         prompt = REVIEW_PROMPT.format(
@@ -568,7 +606,6 @@ class Pipe:
         stdout: str,
         stderr: str,
         files: dict[str, str],
-        emitter: Optional[Callable],
     ) -> dict[str, Any]:
         files_block = self._fmt_existing(files)
         prompt = ANALYST_PROMPT.format(
@@ -614,14 +651,14 @@ class Pipe:
             self.valves.FIXER_MODEL,
             messages,
             emitter=emitter,
-            stream_label="fixer",
+            stream_to_chat=True,
         )
         blocks = _extract_code_blocks(raw)
         if not blocks:
-            raise ValueError("Fixer did not produce any fenced file blocks")
+            raise ValueError("Le fixer n'a produit aucun bloc de fichier")
         return blocks
 
-    # ------------------------------------------------------------------ helpers
+    # ================================================================ helpers
 
     @staticmethod
     def _fmt_existing(files: dict[str, str], limit_chars: int = 40000) -> str:
@@ -642,21 +679,18 @@ class Pipe:
 
     @staticmethod
     def _build_file_tree(files: dict[str, str], project_name: str) -> str:
-        """Build a visual file tree from file paths."""
         if not files:
-            return ""
-        paths = sorted(files.keys())
+            return f"{project_name}/ (empty)"
+        sorted_paths = sorted(files.keys())
         lines = [f"{project_name}/"]
-        for i, p in enumerate(paths):
-            parts = p.split("/")
-            prefix = "    " * (len(parts) - 1)
-            connector = "`-- " if i == len(paths) - 1 else "|-- "
-            lines.append(f"{prefix}{connector}{parts[-1]}")
+        for i, p in enumerate(sorted_paths):
+            is_last = i == len(sorted_paths) - 1
+            symbol = "`-- " if is_last else "|-- "
+            lines.append(f"{symbol}{p}")
         return "\n".join(lines)
 
     @staticmethod
     def _make_zip_base64(files: dict[str, str], project_name: str) -> str:
-        """Create a ZIP in memory and return base64-encoded content."""
         buf = BytesIO()
         with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
             for path, content in sorted(files.items()):
@@ -670,22 +704,6 @@ class Pipe:
             fp = workspace / rel_path
             fp.parent.mkdir(parents=True, exist_ok=True)
             fp.write_text(content, encoding="utf-8")
-
-    @staticmethod
-    def _read_files_from_disk(workspace: Path) -> dict[str, str]:
-        files: dict[str, str] = {}
-        for fp in sorted(workspace.rglob("*")):
-            if fp.is_file() and not any(
-                part.startswith(".") or part == "__pycache__" or part == "node_modules"
-                for part in fp.relative_to(workspace).parts
-            ):
-                try:
-                    files[str(fp.relative_to(workspace))] = fp.read_text(
-                        encoding="utf-8", errors="replace"
-                    )
-                except Exception:
-                    pass
-        return files
 
     def _infer_install_command(
         self, install_cmd: str, test_cmd: str, workspace: Path
@@ -719,7 +737,7 @@ class Pipe:
             parts.append(install_cmd)
         return " && ".join(parts)
 
-    # ------------------------------------------------------------------ MAIN
+    # ================================================================ MAIN PIPE
 
     async def pipe(
         self,
@@ -727,17 +745,39 @@ class Pipe:
         __event_emitter__: Optional[Callable] = None,
         __user__: Optional[dict] = None,
     ) -> str:
-        """Main pipeline entry point called by Open-WebUI."""
         emit = __event_emitter__
         messages = body.get("messages", [])
         if not messages:
-            return "Envoie-moi une description de projet et je le construis pour toi."
+            return "Salut ! Decris un projet et je le construis pour toi, ou parle-moi normalement."
 
         user_prompt = messages[-1].get("content", "").strip()
         if not user_prompt:
-            return "Envoie-moi une description de projet et je le construis pour toi."
+            return "Envoie-moi un message !"
 
-        # Accumulated markdown for the full chat message
+        # ---------------------------------------------------------------
+        # Route: normal chat vs multi-agent pipeline
+        # ---------------------------------------------------------------
+        clean_prompt = _TRIGGER_PREFIX.sub("", user_prompt).strip()
+        if not _is_build_request(user_prompt):
+            # Normal chat mode — forward to Ollama and stream back
+            await self._emit_status(emit, "Reflexion...", done=False)
+            chat_messages = []
+            for m in messages:
+                role = m.get("role", "user")
+                content = m.get("content", "")
+                if role in ("user", "assistant", "system"):
+                    chat_messages.append({"role": role, "content": content})
+            await self._ollama_chat_simple(
+                self.valves.CHAT_MODEL, chat_messages, emitter=emit
+            )
+            await self._emit_status(emit, "", done=True)
+            return ""
+
+        # ---------------------------------------------------------------
+        # Multi-agent pipeline mode
+        # ---------------------------------------------------------------
+        prompt_for_plan = clean_prompt if clean_prompt else user_prompt
+
         md = ""
 
         async def append(text: str) -> None:
@@ -746,63 +786,54 @@ class Pipe:
             await self._emit_message(emit, text)
 
         try:
-            # ============================================================
+            # ==========================================================
             # PHASE 1: PLANNING
-            # ============================================================
-            await self._emit_status(emit, "Phase 1/6 : Planification du projet...")
+            # ==========================================================
+            await self._emit_status(emit, "Phase 1/5 : Planification...")
             await append(
-                "## Multi-Agent Coder Pipeline\n\n"
+                "\n\n"
                 "---\n\n"
-                "### Phase 1/6 : Planification\n\n"
-                "> Analyse de ta demande et decomposition en taches...\n\n"
+                "# Multi-Agent Coder\n\n"
+                "### Phase 1/5 : Planification\n"
+                "> Analyse de ta demande...\n\n"
             )
 
-            plan = await self._run_planner(user_prompt, emit)
+            plan = await self._run_planner(prompt_for_plan)
             project_name = plan.get("name", "project")
             tasks = plan.get("tasks", [])
             files_spec = plan.get("files", [])
             test_cmd = plan.get("test_command", "")
             install_cmd = plan.get("install_command", "")
 
-            # Display plan
-            await append(f"**Projet : `{project_name}`**\n\n")
-            await append(f"> {plan.get('summary', '')}\n\n")
+            await append(f"**Projet** : `{project_name}`\n\n")
+            summary = plan.get("summary", "")
+            if summary:
+                await append(f"> {summary}\n\n")
 
             # Task table
-            await append("| # | Tache | Fichiers | Statut |\n")
-            await append("|---|-------|----------|--------|\n")
+            await append(
+                "| # | Tache | Fichiers |\n"
+                "|:--|:------|:---------|\n"
+            )
             for t in tasks:
                 fps = ", ".join(f"`{f}`" for f in t.get("file_paths", []))
-                await append(
-                    f"| {t.get('id', '?')} | {t.get('title', '?')} | {fps} | En attente |\n"
-                )
+                await append(f"| {t.get('id', '?')} | {t.get('title', '?')} | {fps} |\n")
             await append("\n")
 
-            await self._emit_status(emit, "Phase 1/6 : Planification terminee", done=True)
-
-            # ============================================================
-            # PHASE 2: ARCHITECTURE (file tree)
-            # ============================================================
-            await self._emit_status(emit, "Phase 2/6 : Architecture...")
-            await append(
-                "---\n\n"
-                "### Phase 2/6 : Architecture\n\n"
-            )
-
+            # File tree
             tree = self._build_file_tree(
                 {f["path"]: "" for f in files_spec}, project_name
             )
             await append(f"```\n{tree}\n```\n\n")
-            await self._emit_status(emit, "Phase 2/6 : Architecture terminee", done=True)
 
-            # ============================================================
-            # PHASE 3: CODING
-            # ============================================================
-            await self._emit_status(emit, "Phase 3/6 : Generation du code...")
-            await append(
-                "---\n\n"
-                "### Phase 3/6 : Codage\n\n"
-            )
+            await self._emit_status(emit, "Phase 1/5 : Plan OK", done=True)
+            await self._emit_notification(emit, f"Plan cree : {len(tasks)} taches, {len(files_spec)} fichiers", "info")
+
+            # ==========================================================
+            # PHASE 2: CODING
+            # ==========================================================
+            await self._emit_status(emit, "Phase 2/5 : Generation du code...")
+            await append("---\n\n### Phase 2/5 : Codage\n\n")
 
             all_files: dict[str, str] = {}
             total_tasks = len(tasks)
@@ -810,87 +841,68 @@ class Pipe:
             for idx, task in enumerate(tasks, 1):
                 task_title = task.get("title", f"Task {idx}")
                 await self._emit_status(
-                    emit, f"Phase 3/6 : Codage -- tache {idx}/{total_tasks} : {task_title}"
+                    emit, f"Phase 2/5 : Tache {idx}/{total_tasks} — {task_title}"
                 )
-                await append(f"**Tache {idx}/{total_tasks} : {task_title}**\n\n")
+                await append(f"**[{idx}/{total_tasks}] {task_title}**\n\n")
 
                 try:
                     new_blocks = await self._run_coder_task(plan, task, all_files, emit)
+                    for fpath, content in new_blocks.items():
+                        all_files[fpath] = content
+                    wrote = ", ".join(f"`{f}`" for f in new_blocks)
+                    await append(f"\n\nFichiers ecrits : {wrote}\n\n")
                 except Exception as exc:
-                    await append(f"\n> Erreur sur cette tache: {exc}\n\n")
-                    continue
-
-                for fpath, content in new_blocks.items():
-                    all_files[fpath] = content
-                    line_count = content.count("\n")
-                    await append(f"\n`{fpath}` ({line_count} lignes)\n\n")
+                    await append(f"\n\n> Erreur: {exc}\n\n")
+                    log.warning("Coder task %s failed: %s", task_title, exc)
 
             await self._emit_status(
                 emit,
-                f"Phase 3/6 : Codage termine -- {len(all_files)} fichiers generes",
+                f"Phase 2/5 : {len(all_files)} fichiers generes",
                 done=True,
             )
 
-            # ============================================================
-            # PHASE 4: REVIEW
-            # ============================================================
-            await self._emit_status(emit, "Phase 4/6 : Revue de code...")
-            await append(
-                "---\n\n"
-                "### Phase 4/6 : Revue de code\n\n"
-            )
+            # ==========================================================
+            # PHASE 3: REVIEW
+            # ==========================================================
+            await self._emit_status(emit, "Phase 3/5 : Review...")
+            await append("---\n\n### Phase 3/5 : Review\n\n")
 
             try:
-                review = await self._run_reviewer(plan, all_files, emit)
+                review = await self._run_reviewer(plan, all_files)
                 approved = review.get("approved", True)
                 issues = review.get("issues", [])
-
                 if approved:
-                    await append("> Code approuve par le reviewer.\n\n")
+                    await append("> Code approuve.\n\n")
                 else:
-                    await append(f"> **{len(issues)} probleme(s) detecte(s) :**\n\n")
+                    await append(f"> {len(issues)} probleme(s) detecte(s) :\n\n")
                     for iss in issues[:10]:
                         sev = iss.get("severity", "warning")
-                        icon = "!!!" if sev == "error" else "!"
+                        marker = "ERREUR" if sev == "error" else "Warning"
                         await append(
-                            f"- [{icon}] `{iss.get('file', '?')}` : {iss.get('message', '?')}\n"
+                            f"- **{marker}** `{iss.get('file', '?')}` : {iss.get('message', '?')}\n"
                         )
                     await append("\n")
             except Exception as exc:
-                await append(f"> Review skippee (erreur: {exc})\n\n")
+                await append(f"> Review skippee ({exc})\n\n")
+                log.warning("Review failed: %s", exc)
 
-            await self._emit_status(emit, "Phase 4/6 : Revue terminee", done=True)
+            await self._emit_status(emit, "Phase 3/5 : Review OK", done=True)
 
-            # ============================================================
-            # PHASE 5: TESTING (loop until green)
-            # ============================================================
+            # ==========================================================
+            # PHASE 4: TEST + FIX LOOP
+            # ==========================================================
             if not test_cmd:
-                await append(
-                    "---\n\n"
-                    "### Phase 5/6 : Tests\n\n"
-                    "> Aucune commande de test definie -- skip.\n\n"
-                )
-                await self._emit_status(emit, "Phase 5/6 : Pas de tests", done=True)
+                await append("---\n\n### Phase 4/5 : Tests\n> Pas de commande de test — skip.\n\n")
+                await self._emit_status(emit, "Phase 4/5 : Pas de tests", done=True)
             else:
-                await self._emit_status(emit, "Phase 5/6 : Execution des tests...")
-                await append(
-                    "---\n\n"
-                    "### Phase 5/6 : Tests & Fix Loop\n\n"
-                )
+                await self._emit_status(emit, "Phase 4/5 : Tests...")
+                await append("---\n\n### Phase 4/5 : Tests & Corrections\n\n")
 
-                # Write files to a temp workspace
                 workspace = Path(tempfile.mkdtemp(prefix="mac_"))
                 self._write_files_to_disk(workspace, all_files)
 
-                # Build install + test command
-                full_install = self._infer_install_command(
-                    install_cmd, test_cmd, workspace
-                )
-                full_command = (
-                    f"{full_install} && {test_cmd}"
-                    if full_install
-                    else test_cmd
-                )
+                full_install = self._infer_install_command(install_cmd, test_cmd, workspace)
+                full_command = f"{full_install} && {test_cmd}" if full_install else test_cmd
 
                 max_iter = self.valves.MAX_FIX_ITERATIONS
                 iteration = 0
@@ -898,172 +910,127 @@ class Pipe:
 
                 while True:
                     iteration += 1
-                    if max_iter > 0 and iteration > max_iter:
-                        await append(
-                            f"\n> Limite de {max_iter} iterations atteinte. Arret de la boucle.\n\n"
-                        )
+                    if 0 < max_iter < iteration:
+                        await append(f"\n> Limite de {max_iter} iterations atteinte.\n\n")
                         break
 
-                    await self._emit_status(
-                        emit,
-                        f"Phase 5/6 : Test run #{iteration}...",
-                    )
-                    await append(f"**Test run #{iteration}**\n\n")
-                    await append(f"```bash\n$ {full_command}\n")
+                    await self._emit_status(emit, f"Phase 4/5 : Test #{iteration}...")
+                    await append(f"**Test #{iteration}**\n```\n$ {test_cmd}\n")
 
                     exit_code, stdout, stderr, timed_out = await self._run_sandbox(
                         workspace, full_command
                     )
 
-                    # Show output (truncated)
                     combined = (stdout + "\n" + stderr).strip()
-                    if len(combined) > 3000:
-                        combined = combined[:1500] + "\n...[tronque]...\n" + combined[-1500:]
+                    if len(combined) > 2000:
+                        combined = combined[:800] + "\n...\n" + combined[-800:]
                     await append(f"{combined}\n```\n\n")
 
                     if exit_code == 0 and not timed_out:
                         tests_passed = True
                         await append("> **TOUS LES TESTS PASSENT !**\n\n")
-                        await self._emit_notification(emit, "Tests passes !", "success")
+                        await self._emit_notification(emit, "Tests OK !", "success")
                         break
 
-                    # Show failure
                     if timed_out:
-                        await append(f"> Timeout apres {self.valves.SANDBOX_TIMEOUT}s\n\n")
+                        await append(f"> Timeout ({self.valves.SANDBOX_TIMEOUT}s)\n\n")
                     else:
-                        await append(f"> Exit code: {exit_code}\n\n")
+                        await append(f"> Exit code {exit_code}\n\n")
 
-                    # Analyze failure
-                    await self._emit_status(
-                        emit,
-                        f"Phase 5/6 : Analyse de l'echec #{iteration}...",
-                    )
-                    await append("**Analyse de l'erreur...**\n\n")
-
+                    # Analyse
+                    await self._emit_status(emit, f"Phase 4/5 : Analyse erreur #{iteration}...")
                     try:
-                        analysis = await self._run_analyst(
-                            test_cmd, stdout, stderr, all_files, emit
-                        )
-                        root_cause = analysis.get("root_cause", "Unknown")
-                        await append(f"> Cause racine : {root_cause}\n\n")
+                        analysis = await self._run_analyst(test_cmd, stdout, stderr, all_files)
+                        await append(f"> **Cause** : {analysis.get('root_cause', '?')}\n\n")
                     except Exception:
                         analysis = {
-                            "root_cause": stderr[-500:] if stderr else "Unknown",
+                            "root_cause": stderr[-500:] if stderr else "Erreur inconnue",
                             "files_to_fix": list(all_files.keys())[:3],
-                            "fix_description": "Fix the failing tests based on the error output",
+                            "fix_description": "Corriger selon la sortie d'erreur",
                         }
-                        await append("> Analyse automatique (fallback)\n\n")
 
                     # Fix
-                    await self._emit_status(
-                        emit,
-                        f"Phase 5/6 : Fix iteration #{iteration}...",
-                    )
-                    await append(f"**Fix #{iteration}**\n\n")
-
+                    await self._emit_status(emit, f"Phase 4/5 : Correction #{iteration}...")
+                    await append(f"**Correction #{iteration}**\n\n")
                     try:
                         fixed_blocks = await self._run_fixer(
                             plan, analysis, stdout, stderr, all_files, emit
                         )
                         for fpath, content in fixed_blocks.items():
                             all_files[fpath] = content
-                            await append(f"\n`{fpath}` (modifie)\n")
-                        await append("\n")
-
-                        # Write updated files
+                        fixed_names = ", ".join(f"`{f}`" for f in fixed_blocks)
+                        await append(f"\n\nModifie : {fixed_names}\n\n")
                         self._write_files_to_disk(workspace, all_files)
                     except Exception as exc:
-                        await append(f"\n> Erreur du fixer: {exc}\n\n")
+                        await append(f"\n\n> Erreur fixer: {exc}\n\n")
+                        log.warning("Fixer failed: %s", exc)
 
-                # Cleanup workspace
                 try:
                     shutil.rmtree(workspace, ignore_errors=True)
                 except Exception:
                     pass
 
                 status_msg = (
-                    "Phase 5/6 : Tests passes !"
+                    "Phase 4/5 : Tests OK !"
                     if tests_passed
-                    else f"Phase 5/6 : Tests echoues apres {iteration} iterations"
+                    else f"Phase 4/5 : Echec apres {iteration} iterations"
                 )
                 await self._emit_status(emit, status_msg, done=True)
 
-            # ============================================================
-            # PHASE 6: PACKAGING (ZIP)
-            # ============================================================
-            await self._emit_status(emit, "Phase 6/6 : Creation du ZIP...")
-            await append(
-                "---\n\n"
-                "### Phase 6/6 : Livraison\n\n"
-            )
+            # ==========================================================
+            # PHASE 5: ZIP
+            # ==========================================================
+            await self._emit_status(emit, "Phase 5/5 : Packaging ZIP...")
+            await append("---\n\n### Phase 5/5 : Livraison\n\n")
+
+            if not all_files:
+                await append("> Aucun fichier genere — impossible de creer le ZIP.\n\n")
+                await self._emit_status(emit, "Termine (aucun fichier)", done=True)
+                return ""
 
             zip_b64 = self._make_zip_base64(all_files, project_name)
             zip_size_kb = len(base64.b64decode(zip_b64)) / 1024
 
-            await append(f"**{project_name}.zip** ({zip_size_kb:.1f} Ko)\n\n")
-
-            # Show final file tree
+            # Final file tree
             final_tree = self._build_file_tree(all_files, project_name)
             await append(f"```\n{final_tree}\n```\n\n")
 
-            # Provide download via JavaScript execution in the browser
-            js_download = (
-                f"(function(){{"
-                f"var a=document.createElement('a');"
-                f"a.href='data:application/zip;base64,{zip_b64}';"
-                f"a.download='{project_name}.zip';"
-                f"document.body.appendChild(a);a.click();document.body.removeChild(a);"
-                f"return '{project_name}.zip telecharge!';"
-                f"}})()"
-            )
-
-            # Emit the download trigger
-            if emit:
-                await emit(
-                    {
-                        "type": "execute",
-                        "data": {"code": js_download},
-                    }
-                )
-
-            # Also provide a clickable data URL as fallback
+            # Download button (HTML in markdown)
             data_url = f"data:application/zip;base64,{zip_b64}"
             await append(
                 f'<a href="{data_url}" download="{project_name}.zip" '
-                f'style="display:inline-block;padding:12px 24px;background:#10b981;'
-                f"color:white;border-radius:8px;text-decoration:none;font-weight:bold;"
-                f'font-size:16px;margin:8px 0;">'
-                f"Telecharger {project_name}.zip</a>\n\n"
+                f'style="display:inline-block;padding:14px 28px;'
+                f"background:linear-gradient(135deg,#10b981,#059669);"
+                f"color:white;border-radius:10px;text-decoration:none;"
+                f"font-weight:bold;font-size:16px;margin:12px 0;"
+                f'box-shadow:0 4px 14px rgba(16,185,129,0.4);">'
+                f"Telecharger {project_name}.zip ({zip_size_kb:.1f} Ko)</a>\n\n"
             )
-
-            await append("---\n\n")
 
             # Summary
             total_lines = sum(c.count("\n") for c in all_files.values())
             await append(
-                f"**Resume :**\n"
-                f"- {len(all_files)} fichiers generes\n"
-                f"- {total_lines} lignes de code\n"
-                f"- {len(tasks)} taches completees\n"
-                f"- {zip_size_kb:.1f} Ko (ZIP)\n\n"
+                "---\n\n"
+                f"**{len(all_files)}** fichiers | "
+                f"**{total_lines}** lignes | "
+                f"**{len(tasks)}** taches | "
+                f"**{zip_size_kb:.1f} Ko**\n"
             )
 
-            await self._emit_status(emit, "Pipeline terminee !", done=True)
-            await self._emit_notification(emit, f"Projet {project_name} termine !", "success")
-
+            await self._emit_status(emit, f"Projet {project_name} termine !", done=True)
+            await self._emit_notification(emit, f"{project_name} pret !", "success")
             return ""
 
         except Exception as exc:
             error_detail = traceback.format_exc()
             log.exception("Pipeline failed")
             await self._emit_status(emit, f"Erreur: {exc}", done=True)
-            await self._emit_notification(emit, f"Erreur: {exc}", "error")
-            error_msg = (
-                f"\n\n---\n\n"
-                f"### Erreur Pipeline\n\n"
+            await self._emit_notification(emit, f"Erreur pipeline: {exc}", "error")
+            await append(
+                "\n\n---\n\n"
+                "### Erreur\n\n"
                 f"```\n{error_detail}\n```\n\n"
-                f"Verifie que ton serveur Ollama est accessible a "
-                f"`{self.valves.OLLAMA_BASE_URL}` et que les modeles sont installes."
+                f"Verifie que Ollama tourne sur `{self.valves.OLLAMA_BASE_URL}` "
+                f"et que les modeles sont installes.\n"
             )
-            await append(error_msg)
             return ""
