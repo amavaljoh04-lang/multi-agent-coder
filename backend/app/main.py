@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import shutil
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,6 +21,7 @@ from .events import bus
 from .models import Event, Project, ProjectFile, ProjectNote, ProjectStatus, Task
 from .ollama_client import get_router, shutdown_router
 from .orchestrator import get_orchestrator
+from .web_search import search_and_format
 from .schemas import (
     ChatRequest,
     ChatResponse,
@@ -135,7 +137,24 @@ CHAT_SYSTEM = (
     "You are a friendly AI assistant embedded in Multi-Agent Coder, a tool "
     "that generates full coding projects via an AI pipeline. When the user "
     "chats casually, respond helpfully and concisely. Reply in the same "
-    "language as the user. Keep responses short (2-4 sentences max)."
+    "language as the user. Keep responses short (2-4 sentences max).\n"
+    "IMPORTANT: If the user asks a factual question you are not sure about, "
+    "or asks about current events, recent technologies, APIs, libraries, "
+    "or anything you might not have accurate information on, you MUST "
+    "reply with EXACTLY: [SEARCH:your search query here]\n"
+    "Example: User asks 'What is the latest version of React?' → "
+    "reply '[SEARCH:latest React version 2026]'\n"
+    "Only use [SEARCH:...] when you genuinely lack confidence. "
+    "For greetings, opinions, or things you know well, answer directly."
+)
+
+_SEARCH_RE = re.compile(r"\[SEARCH:(.+?)\]", re.IGNORECASE)
+
+CHAT_WITH_CONTEXT_SYSTEM = (
+    "You are a friendly AI assistant embedded in Multi-Agent Coder. "
+    "Answer the user's question using the web search results provided below. "
+    "Be concise (2-4 sentences). Cite sources when relevant. "
+    "Reply in the same language as the user."
 )
 
 
@@ -175,6 +194,28 @@ async def chat(req: ChatRequest) -> ChatResponse:
             reply = await router.chat("dispatcher", chat_messages)
         except Exception:
             reply = "Désolé, je n'arrive pas à joindre le modèle pour le moment. Réessaye dans quelques instants."
+
+    # Web search fallback: if the model signals it needs to search.
+    search_match = _SEARCH_RE.search(reply)
+    if search_match:
+        query = search_match.group(1).strip()
+        log.info("Chat triggered web search: %r", query)
+        search_context = await search_and_format(query)
+        if search_context:
+            augmented_messages: list[dict[str, str]] = [
+                {"role": "system", "content": CHAT_WITH_CONTEXT_SYSTEM},
+            ]
+            for h in req.history[-4:]:
+                augmented_messages.append({"role": h.get("role", "user"), "content": h.get("content", "")})
+            augmented_messages.append(
+                {"role": "user", "content": f"{req.message}\n\n{search_context}"}
+            )
+            try:
+                reply = await router.chat("dispatcher", augmented_messages)
+            except Exception:
+                reply = reply.replace(search_match.group(0), "(recherche web indisponible)")
+        else:
+            reply = reply.replace(search_match.group(0), "(aucun résultat trouvé)")
 
     return ChatResponse(reply=reply, intent="chat")
 

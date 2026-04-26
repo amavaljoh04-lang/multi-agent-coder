@@ -44,6 +44,7 @@ from .events import bus
 from .models import Event, Project, ProjectFile, ProjectNote, ProjectStatus, Task, TaskStatus, TestRun
 from .ollama_client import OllamaRouter, get_router
 from .sandbox import RunResult, Sandbox
+from .web_search import search_and_format
 
 log = logging.getLogger(__name__)
 
@@ -383,6 +384,25 @@ class Orchestrator:
         review_notes = task.review_notes or ""
         plan = await self._inject_user_notes(project_id, plan)
 
+        # Web search: gather context for tasks that mention external APIs/libs.
+        web_context = ""
+        task_text = f"{task.title} {task.description}"
+        search_keywords = [
+            "api", "library", "framework", "sdk", "package",
+            "endpoint", "documentation", "tutorial", "how to",
+        ]
+        if any(kw in task_text.lower() for kw in search_keywords):
+            try:
+                search_query = f"{plan.get('language', 'python')} {task.title}"
+                web_context = await search_and_format(search_query, max_results=3)
+                if web_context:
+                    await self.emit(
+                        project_id, "info", "search",
+                        f"[{task.title}] web search context gathered",
+                    )
+            except Exception:
+                pass
+
         await self.emit(
             project_id, "agent", "coder",
             f"[{task.title}] coding {len(task.file_paths)} file(s)",
@@ -392,7 +412,9 @@ class Orchestrator:
             task_dict = {
                 "id": task.id,
                 "title": task.title,
-                "description": task.description,
+                "description": task.description + (
+                    f"\n\n{web_context}" if web_context else ""
+                ),
                 "file_paths": task.file_paths,
             }
             coder_role = self._coder_role_for_files(task.file_paths)
